@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>每日新闻 / Daily News</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <h1>每日新闻 <span class="bi">Daily News</span></h1>
+      <p class="sub">
+        综合 · AI · 民生 · 社会国内 · 社会国外 — 每模块每页 10 条，多源交叉验证（来源按 Tier 分级）
+      </p>
+    </div>
+
+    <nav class="viewtabs" id="viewtabs">
+      <button class="vtab active" type="button" data-view="today">今日 <span class="bi">Today</span></button>
+      <button class="vtab" type="button" data-view="history">历史 <span class="bi">History</span></button>
+    </nav>
+
+    <!-- 右上角工具栏：语言切换 + 历史页的搜索/清理都放这里，模块标签栏只放模块 -->
+    <div class="actions">
+      <span id="meta" class="meta"></span>
+      <span id="history-tools" class="history-tools hidden">
+        <button id="h-search" class="btn small primary" type="button">搜索</button>
+        <button id="h-clear" class="btn small" type="button">清空筛选</button>
+      </span>
+      <button id="lang" class="btn lang" type="button" title="切换界面语言 / Switch language">EN</button>
+    </div>
+  </header>
+
+  <!-- ==================== 今日视图 ==================== -->
+  <section id="today-view">
+    <nav class="modtabs" id="modtabs"></nav>
+
+    <div class="toolbar" id="today-toolbar">
+      <button id="refresh" class="btn primary" type="button">刷新</button>
+      <span id="progress" class="progress"></span>
+
+      <label class="switch" title="只看高热点（评分 ≥ 3） / Only hotspots (score ≥ 3)">
+        <input type="checkbox" id="hot-only">
+        <span id="hot-only-label">只看高热点</span>
+      </label>
+
+      <select id="cred-filter" title="可信度 / Credibility"></select>
+      <select id="score-filter" title="我的评分 / My rating"></select>
+      <select id="sort" title="排序 / Sort"></select>
+
+      <span class="grow"></span>
+      <span id="quota" class="quota"></span>
+      <span class="pager">
+        <button id="prev" class="btn small" type="button">上一页</button>
+        <span id="pageinfo" class="pageinfo">1 / 1</span>
+        <button id="next" class="btn small" type="button">下一页</button>
+      </span>
+    </div>
+
+    <div id="banner" class="banner hidden"></div>
+    <div id="cards" class="cards"></div>
+  </section>
+
+  <!-- ==================== 历史视图 ==================== -->
+  <section id="history-view" class="hidden">
+    <div class="toolbar filters" id="history-toolbar">
+      <label class="field-inline">日期<input type="date" id="h-date"></label>
+      <button id="h-today" class="btn small" type="button">今天</button>
+      <select id="h-module" title="模块 / Module"></select>
+      <select id="h-cred" title="可信度 / Credibility"></select>
+      <select id="h-score" title="我的评分 / My rating"></select>
+      <input type="search" id="h-q" placeholder="关键词搜索标题与摘要 / keyword in title &amp; summary">
+      <span class="grow"></span>
+      <span id="h-pageinfo" class="pageinfo">1 / 1</span>
+      <button id="h-prev" class="btn small" type="button">上一页</button>
+      <button id="h-next" class="btn small" type="button">下一页</button>
+    </div>
+    <div id="h-banner" class="banner hidden"></div>
+    <div id="h-info" class="hinfo"></div>
+    <div id="hcards" class="cards"></div>
+  </section>
+
+  <footer class="footer">
+    <span>
+      本地运行 · SQLite · 模块内独立去重 · 可信度按来源 Tier 自动判定，可人工覆盖<br>
+      <span class="bi">Local only · SQLite · per-module dedup · credibility is tier-based and human-overridable</span>
+    </span>
+    <span id="errs" class="errs"></span>
+  </footer>
+
+  <div id="modal" class="modal hidden"><div class="modal-box" id="modal-box"></div></div>
+  <div id="toast" class="toast hidden"></div>
+
+  <script src="{{ url_for('static', filename='app.js') }}"></script>
+  <script src="{{ url_for('static', filename='today.js') }}"></script>
+  <script src="{{ url_for('static', filename='history.js') }}"></script>
+</body>
+</html>

@@ -1,0 +1,455 @@
+{
+  "_doc": "新闻源配置。domain: ai / livelihood / society_cn / society_intl。tier: 1=官方权威(官方发布，默认可信度极高) / 2=主流·行业标杆(有采编规范) / 3=一般媒体·商业媒体(可能有商业立场) / 4=未知·自媒体(未登记来源默认最低)。type: official / mainstream / international / industry / other。tier 与 type 直接决定可信度自动判定，未写 tier 的源按 tier 4 处理。每条源 rss 优先，rss 为空/失败/停更则按 web 爬网页。enabled=false 表示本机实测不可用（网络不可达或源已停更），换到有代理的环境后可改回 true。可用 python probe_sources.py 复测。",
+  "settings": {
+    "timeout": 10,
+    "max_per_source": 12,
+    "lookback_hours": 72,
+    "workers": 6
+  },
+  "module_filters": {
+    "_doc": "可选：给某个模块配关键词门，**标题**命中任意一个才收进该模块（只看标题，避免摘要里的背景词把无关条目带进来）。中文关键词按子串匹配，纯英文关键词按整词匹配（避免 ai 命中 said）。留空表示不过滤。",
+    "ai": [
+      "ai", "人工智能", "大模型", "大语言模型", "模型", "算法", "机器学习", "深度学习",
+      "神经网络", "智能体", "生成式", "多模态", "数据集", "推理模型",
+      "agent", "agentic", "llm", "gpt", "chatgpt", "openai", "anthropic", "claude",
+      "gemini", "deepmind", "midjourney", "sora", "copilot", "qwen", "deepseek",
+      "豆包", "通义", "文心", "英伟达", "nvidia", "gpu", "算力", "机器人",
+      "自动驾驶", "语音识别", "图像生成", "aigc", "智能体平台"
+    ]
+  },
+  "sources": [
+    {
+      "name": "量子位",
+      "domain": "ai",
+      "tier": 2,
+      "type": "industry",
+      "rss": "https://www.qbitai.com/feed"
+    },
+    {
+      "name": "IT之家",
+      "domain": "ai",
+      "tier": 3,
+      "type": "industry",
+      "rss": "https://www.ithome.com/rss/"
+    },
+    {
+      "name": "爱范儿",
+      "domain": "ai",
+      "tier": 3,
+      "type": "industry",
+      "rss": "https://www.ifanr.com/feed"
+    },
+    {
+      "name": "少数派",
+      "domain": "ai",
+      "tier": 3,
+      "type": "industry",
+      "rss": "https://sspai.com/feed"
+    },
+    {
+      "name": "Solidot",
+      "domain": "ai",
+      "tier": 3,
+      "type": "industry",
+      "rss": "https://www.solidot.org/index.rss"
+    },
+    {
+      "name": "OpenAI News",
+      "domain": "ai",
+      "tier": 2,
+      "type": "industry",
+      "rss": "https://openai.com/news/rss.xml",
+      "_note": "厂商官方博客：属官方声明，但不是权威机构，按行业标杆记 Tier 2"
+    },
+    {
+      "name": "Google DeepMind 博客",
+      "domain": "ai",
+      "tier": 2,
+      "type": "industry",
+      "rss": "https://deepmind.google/blog/rss.xml",
+      "_note": "厂商官方博客，同上按 Tier 2"
+    },
+    {
+      "name": "MIT Technology Review AI",
+      "domain": "ai",
+      "tier": 2,
+      "type": "mainstream",
+      "rss": "https://www.technologyreview.com/topic/artificial-intelligence/feed"
+    },
+    {
+      "name": "TechCrunch AI",
+      "domain": "ai",
+      "tier": 2,
+      "type": "industry",
+      "rss": "https://techcrunch.com/category/artificial-intelligence/feed/"
+    },
+    {
+      "name": "VentureBeat AI",
+      "domain": "ai",
+      "tier": 3,
+      "type": "industry",
+      "rss": "https://venturebeat.com/category/ai/feed/",
+      "_note": "更新较慢，条目可能被 72 小时窗口过滤掉"
+    },
+    {
+      "name": "机器之心",
+      "domain": "ai",
+      "tier": 2,
+      "type": "industry",
+      "enabled": false,
+      "rss": "https://www.jiqizhixin.com/rss",
+      "_note": "本机实测：RSS 不是合法 XML，首页为 JS 渲染，抓不到条目"
+    },
+
+    {
+      "name": "中国新闻网 社会",
+      "domain": "livelihood",
+      "tier": 3,
+      "type": "mainstream",
+      "rss": "https://www.chinanews.com.cn/rss/society.xml"
+    },
+    {
+      "name": "中国新闻网 健康",
+      "domain": "livelihood",
+      "tier": 3,
+      "type": "mainstream",
+      "rss": "https://www.chinanews.com.cn/rss/health.xml"
+    },
+    {
+      "name": "中国新闻网 教育",
+      "domain": "livelihood",
+      "tier": 3,
+      "type": "mainstream",
+      "rss": "https://www.chinanews.com.cn/rss/edu.xml"
+    },
+    {
+      "name": "中国新闻网 财经",
+      "domain": "livelihood",
+      "tier": 3,
+      "type": "mainstream",
+      "rss": "https://www.chinanews.com.cn/rss/finance.xml"
+    },
+    {
+      "name": "教育部 新闻发布",
+      "domain": "livelihood",
+      "tier": 1,
+      "type": "official",
+      "web": {
+        "page": "http://www.moe.gov.cn/jyb_xwfb/",
+        "list": "body",
+        "link": "a",
+        "include": "t\\d{8}_\\d+\\.html"
+      }
+    },
+    {
+      "name": "人民网 健康",
+      "domain": "livelihood",
+      "tier": 1,
+      "type": "official",
+      "enabled": false,
+      "rss": "http://www.people.com.cn/rss/health.xml",
+      "_note": "人民日报社官网，Tier 1；但 RSS 停在 2025-06，已停更"
+    },
+    {
+      "name": "人民网 社会",
+      "domain": "livelihood",
+      "tier": 1,
+      "type": "official",
+      "enabled": false,
+      "rss": "http://www.people.com.cn/rss/society.xml",
+      "_note": "Tier 1；RSS 停在 2025-06，已停更"
+    },
+    {
+      "name": "新华网 时政",
+      "domain": "livelihood",
+      "tier": 1,
+      "type": "official",
+      "enabled": false,
+      "rss": "http://www.xinhuanet.com/politics/news_politics.xml",
+      "_note": "Tier 1；RSS 停在 2022，网页版首页为 JS 渲染"
+    },
+    {
+      "name": "中国政府网 最新政策",
+      "domain": "livelihood",
+      "tier": 1,
+      "type": "official",
+      "enabled": false,
+      "web": {
+        "page": "https://www.gov.cn/zhengce/zuixin/",
+        "list": "body",
+        "link": "a",
+        "include": "/zhengce/"
+      },
+      "_note": "Tier 1；本机实测页面 JS 渲染，静态 HTML 里没有政策条目"
+    },
+    {
+      "name": "国家卫生健康委",
+      "domain": "livelihood",
+      "tier": 1,
+      "type": "official",
+      "enabled": false,
+      "web": {
+        "page": "http://www.nhc.gov.cn/xcs/yqtb/list_gzbd.shtml",
+        "list": "body",
+        "link": "a",
+        "include": "\\.shtml$"
+      },
+      "_note": "Tier 1；本机实测返回 412 Precondition Failed（反爬）"
+    },
+    {
+      "name": "人社部 要闻",
+      "domain": "livelihood",
+      "tier": 1,
+      "type": "official",
+      "enabled": false,
+      "web": {
+        "page": "http://www.mohrss.gov.cn/SYrlzyhshbzb/dongtaixinwen/buneiyaowen/",
+        "list": "body",
+        "link": "a",
+        "include": "mohrss\\.gov\\.cn"
+      },
+      "_note": "Tier 1；本机实测内页由 JS 加载，静态 HTML 只有 987 字节"
+    },
+
+    {
+      "name": "中国新闻网 国内",
+      "domain": "society_cn",
+      "tier": 3,
+      "type": "mainstream",
+      "rss": "https://www.chinanews.com.cn/rss/china.xml"
+    },
+    {
+      "name": "界面新闻",
+      "domain": "society_cn",
+      "tier": 3,
+      "type": "mainstream",
+      "rss": "https://a.jiemian.com/index.php?m=article&a=rss"
+    },
+    {
+      "name": "澎湃新闻",
+      "domain": "society_cn",
+      "tier": 2,
+      "type": "mainstream",
+      "web": {
+        "page": "https://www.thepaper.cn/",
+        "list": "body",
+        "link": "a",
+        "include": "newsDetail"
+      }
+    },
+    {
+      "name": "新京报",
+      "domain": "society_cn",
+      "tier": 3,
+      "type": "mainstream",
+      "web": {
+        "page": "https://www.bjnews.com.cn/",
+        "list": "body",
+        "link": "a",
+        "include": "bjnews\\.com\\.cn/(detail|m/detail)"
+      }
+    },
+    {
+      "name": "央视网 社会",
+      "domain": "society_cn",
+      "tier": 1,
+      "type": "official",
+      "web": {
+        "page": "https://news.cctv.com/society/",
+        "list": "body",
+        "link": "a",
+        "include": "news\\.cctv\\.com/\\d{4}/"
+      }
+    },
+    {
+      "name": "央视网 中国",
+      "domain": "society_cn",
+      "tier": 1,
+      "type": "official",
+      "web": {
+        "page": "https://news.cctv.com/china/",
+        "list": "body",
+        "link": "a",
+        "include": "news\\.cctv\\.com/\\d{4}/"
+      }
+    },
+    {
+      "name": "中国新闻周刊",
+      "domain": "society_cn",
+      "tier": 3,
+      "type": "mainstream",
+      "web": {
+        "page": "https://www.inewsweek.cn/",
+        "list": "body",
+        "link": "a",
+        "include": "inewsweek\\.cn/(observe|society|world|economy|wh)/\\d{4}-"
+      }
+    },
+    {
+      "name": "中国新闻网 滚动",
+      "domain": "society_cn",
+      "tier": 3,
+      "type": "mainstream",
+      "enabled": false,
+      "rss": "https://www.chinanews.com.cn/rss/scroll-news.xml",
+      "_note": "全站滚动 feed，会把国际新闻混进“社会国内”，与“万国”频道大量重复，故停用"
+    },
+    {
+      "name": "新华网 法治",
+      "domain": "society_cn",
+      "tier": 1,
+      "type": "official",
+      "enabled": false,
+      "rss": "http://www.xinhuanet.com/legal/news_legal.xml",
+      "_note": "Tier 1；条目无发布时间，无法判断新旧，容易混入旧闻"
+    },
+    {
+      "name": "澎湃新闻 要闻（RSSHub）",
+      "domain": "society_cn",
+      "tier": 2,
+      "type": "mainstream",
+      "enabled": false,
+      "rss": "https://rsshub.app/thepaper/featured",
+      "_note": "公共 RSSHub 实例本机不通，自建实例后可启用"
+    },
+
+    {
+      "name": "中国新闻网 万国",
+      "domain": "society_intl",
+      "tier": 3,
+      "type": "mainstream",
+      "rss": "https://www.chinanews.com.cn/rss/world.xml"
+    },
+    {
+      "name": "联合国新闻 中文",
+      "domain": "society_intl",
+      "tier": 1,
+      "type": "official",
+      "rss": "https://news.un.org/feed/subscribe/zh/news/all/rss.xml"
+    },
+    {
+      "name": "ABC News 国际",
+      "domain": "society_intl",
+      "tier": 2,
+      "type": "international",
+      "rss": "https://abcnews.go.com/abcnews/internationalheadlines"
+    },
+    {
+      "name": "NPR World",
+      "domain": "society_intl",
+      "tier": 2,
+      "type": "international",
+      "rss": "https://feeds.npr.org/1004/rss.xml"
+    },
+    {
+      "name": "France 24",
+      "domain": "society_intl",
+      "tier": 2,
+      "type": "international",
+      "rss": "https://www.france24.com/en/rss"
+    },
+    {
+      "name": "TASS",
+      "domain": "society_intl",
+      "tier": 2,
+      "type": "international",
+      "rss": "https://tass.com/rss/v2.xml"
+    },
+    {
+      "name": "BBC 中文网",
+      "domain": "society_intl",
+      "tier": 2,
+      "type": "international",
+      "enabled": false,
+      "rss": "https://feeds.bbci.co.uk/zhongwen/simp/rss.xml",
+      "web": {
+        "page": "https://www.bbc.com/zhongwen/simp",
+        "list": "body",
+        "link": "a",
+        "include": "bbc\\.com/zhongwen"
+      },
+      "_note": "本机网络不可达（需要代理）"
+    },
+    {
+      "name": "德国之声 中文",
+      "domain": "society_intl",
+      "tier": 2,
+      "type": "international",
+      "enabled": false,
+      "rss": "https://rss.dw.com/rdf/rss-chi-all",
+      "_note": "本机网络不可达（需要代理）"
+    },
+    {
+      "name": "纽约时报中文网",
+      "domain": "society_intl",
+      "tier": 2,
+      "type": "international",
+      "enabled": false,
+      "rss": "https://cn.nytimes.com/rss/",
+      "_note": "本机网络不可达（需要代理）"
+    },
+    {
+      "name": "卫报 World",
+      "domain": "society_intl",
+      "tier": 2,
+      "type": "international",
+      "enabled": false,
+      "rss": "https://www.theguardian.com/world/rss",
+      "_note": "本机网络不可达（需要代理）"
+    },
+    {
+      "name": "半岛电视台",
+      "domain": "society_intl",
+      "tier": 2,
+      "type": "international",
+      "enabled": false,
+      "rss": "https://www.aljazeera.com/xml/rss/all.xml",
+      "_note": "本机网络不可达（需要代理）"
+    },
+    {
+      "name": "法国国际广播 RFI 中文",
+      "domain": "society_intl",
+      "tier": 2,
+      "type": "international",
+      "enabled": false,
+      "rss": "https://www.rfi.fr/cn/rss",
+      "_note": "本机网络不可达（需要代理）"
+    },
+    {
+      "name": "FT 中文网",
+      "domain": "society_intl",
+      "tier": 2,
+      "type": "international",
+      "enabled": false,
+      "rss": "https://www.ftchinese.com/rss/news",
+      "_note": "本机网络不可达（需要代理）"
+    },
+    {
+      "name": "联合早报",
+      "domain": "society_intl",
+      "tier": 2,
+      "type": "international",
+      "enabled": false,
+      "rss": "https://www.zaobao.com.sg/rss/realtime/world",
+      "_note": "本机实测返回的不是 RSS"
+    },
+    {
+      "name": "中央社",
+      "domain": "society_intl",
+      "tier": 2,
+      "type": "international",
+      "enabled": false,
+      "rss": "https://www.cna.com.tw/rss/aall.aspx",
+      "_note": "本机网络不可达（需要代理）"
+    },
+    {
+      "name": "香港电台 RTHK",
+      "domain": "society_intl",
+      "tier": 2,
+      "type": "international",
+      "enabled": false,
+      "rss": "https://rthk9.rthk.hk/rthk/news/rss/c_expressnews.xml",
+      "_note": "本机网络不可达（需要代理）"
+    }
+  ]
+}
