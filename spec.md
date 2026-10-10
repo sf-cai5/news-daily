@@ -659,3 +659,123 @@ body: { "score": 4, "note": "适合做视频" }      # score 传 null 表示清�
 
 内容评分接口：`POST /api/news/<id>/user-score`，body `{"score": 1..5, "note": "可选"}`（`score: null` 清除评分）。
 点击星星即保存，刷新页面后高亮不变。
+
+---
+
+# v2.3 变更（追加章节）
+
+> **状态：已列入规格，尚未实现 —— 不要当成已完成功能。**
+>
+> 本节于 2026-10-10 追加，作为下一版本的实施依据。当前代码**没有**实现本节任何内容：
+> `news` 表没有 `user_vote` / `hidden` / `hidden_at` 字段，没有 `source_weights` 表，
+> 没有 `/api/news/<id>/vote`、`/api/news/<id>/unhide`、`/api/source-weights` 接口，
+> 卡片上没有 👍 / 👎 按钮。实施时以本节为准，落库前先做上面那三条 `ALTER TABLE`。
+
+## 1. 数据模型新增
+
+### news 表新增字段
+
+| 字段 | 说明 |
+|---|---|
+| user_vote | up / down / none |
+| hidden | 0 / 1，点踩后为 1 |
+| hidden_at | 隐藏时间 |
+
+数据库迁移：
+
+```sql
+ALTER TABLE news ADD COLUMN user_vote TEXT DEFAULT 'none';
+ALTER TABLE news ADD COLUMN hidden INTEGER DEFAULT 0;
+ALTER TABLE news ADD COLUMN hidden_at TEXT;
+```
+
+### 新增表：source_weights
+
+| 字段 | 说明 |
+|---|---|
+| source_name | 来源名，主键 |
+| weight | 权重，初始 0，范围 -10 到 +10 |
+| updated_at | 最后更新时间 |
+
+```sql
+CREATE TABLE IF NOT EXISTS source_weights (
+  source_name TEXT PRIMARY KEY,
+  weight INTEGER DEFAULT 0,
+  updated_at TEXT
+);
+```
+
+## 2. 交互规则
+
+### 点赞
+- 点击 👍
+- 该新闻来源权重 +1
+- 新闻保留，正常展示
+- `user_vote = up`
+
+### 点踩
+- 点击 👎
+- 该新闻 `hidden = 1`，从今日页消失
+- 该新闻来源权重 -1
+- `user_vote = down`
+- 历史页仍可查到，并显示“已隐藏”标记
+- 历史页提供“取消隐藏”入口
+
+### 权重范围
+- 下限 -10，上限 +10
+- 每月自动衰减 10%，防止偏见累积
+
+## 3. 来源权重影响
+
+### 3.1 排序
+- 权重高的来源，新闻优先排在前面
+- 权重低的来源，新闻排在后面
+
+### 3.2 可信度判定辅助
+- 权重 ≥ +5 的 Tier 2 源，可视为 Tier 1.5，参与“已证实”判定
+- 权重 ≤ -5 的 Tier 2 源，降为 Tier 3，参与判定
+- 不覆盖原 Tier 规则，只做微调
+
+### 3.3 抓取
+- 权重 ≤ -5 的来源，抓取时减少条数，但不完全屏蔽
+- 权重 ≥ +5 的来源，抓取时优先抓取
+
+## 4. API 新增
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| POST | /api/news/&lt;id&gt;/vote | body: { "action": "up" / "down" } |
+| POST | /api/news/&lt;id&gt;/unhide | 取消隐藏，恢复展示 |
+| GET | /api/source-weights | 查看所有来源权重 |
+
+## 5. 前端改动
+
+- 每条新闻卡片加 👍 / 👎 按钮
+- 点踩后，卡片从今日页消失，提示“已隐藏，可在历史页查看”
+- 历史页增加筛选：显示已隐藏 / 只看已隐藏
+- 历史页已隐藏新闻显示“已隐藏”标记，并提供“取消隐藏”按钮
+- 来源旁边可选显示当前权重（默认不显示，鼠标悬停显示）
+
+## 6. 与 user_score 的关系
+
+- `user_score`（1–5 星）：你对内容质量的主观评分，保留不变
+- `user_vote`（👍/👎）：你对来源偏好的反馈，影响来源权重
+- 两者独立，互不干扰
+
+## 7. 验收标准新增
+
+- [ ] 卡片有 👍 / 👎 按钮
+- [ ] 点赞后来源权重 +1
+- [ ] 点踩后来源权重 -1，该新闻从今日页隐藏
+- [ ] 历史页仍可查到被隐藏的新闻
+- [ ] 历史页可取消隐藏
+- [ ] 来源权重影响排序
+- [ ] 来源权重影响可信度判定辅助
+- [ ] 权重范围 -10 到 +10
+- [ ] 每月自动衰减 10%
+
+## 8. 禁止事项新增
+
+- 禁止点踩后永久删除新闻
+- 禁止来源权重无上限增长或无限下降
+- 禁止因点踩而完全屏蔽某个来源
