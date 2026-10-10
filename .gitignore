@@ -17,7 +17,4 @@ venv/
 .DS_Store
 Thumbs.db
 
-# 本地文档（spec 与说明留在本机，不随代码上传）
-spec.md
-README.md
 _spec_v*.md
