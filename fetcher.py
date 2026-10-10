@@ -31,6 +31,10 @@ DEFAULT_MAX_PER_SOURCE = 12
 # spec v2：时窗放宽到 24h → 48h → 72h，所以抓取窗口直接取最宽的一档
 DEFAULT_LOOKBACK_HOURS = 72
 DEFAULT_WORKERS = 6
+# spec v2.3 第 3.3 节：来源权重影响抓取（降权少抓、加权多抓），但绝不屏蔽来源
+WEIGHT_PRIORITY = 5       # 权重 ≥ +5：优先抓，条数上调
+WEIGHT_DEPRIORITY = -5    # 权重 ≤ -5：条数下调
+WEIGHT_FLOOR_ITEMS = 3    # 降权源仍至少抓这么多条（不完全屏蔽）
 
 _TAG = re.compile(r"<[^>]+>")
 _WS = re.compile(r"\s+")
@@ -370,8 +374,13 @@ def enrich_summaries(items: list, settings: dict | None = None, workers: int = 4
     return filled
 
 
-def fetch_all(sources: list, settings: dict | None = None) -> tuple:
-    """全量扫描所有源（并发）。返回 (items, errors)；errors 为 [{source, error}]。"""
+def fetch_all(sources: list, settings: dict | None = None, weights: dict | None = None) -> tuple:
+    """全量扫描所有源（并发）。返回 (items, errors)；errors 为 [{source, error}]。
+
+    weights（来源名 → 权重，来自 source_weights 表）只做两件事（spec v2.3 第 3.3 节）：
+    - 权重 ≤ -5 的源少抓条数（最低仍保留 WEIGHT_FLOOR_ITEMS 条，不屏蔽）；
+    - 权重 ≥ +5 的源优先抓、条数上调，并且它的条目排在候选池前面。
+    """
     cfg = {
         "timeout": DEFAULT_TIMEOUT,
         "max_per_source": DEFAULT_MAX_PER_SOURCE,
@@ -379,12 +388,16 @@ def fetch_all(sources: list, settings: dict | None = None) -> tuple:
         "workers": DEFAULT_WORKERS,
     }
     cfg.update(settings or {})
+    weights = {str(k): int(v or 0) for k, v in (weights or {}).items()}
     active = [s for s in sources if s.get("enabled", True) is not False]
+    # 权重高的源先提交到线程池，先拿到数据
+    active.sort(key=lambda s: -weights.get(str(s.get("name", "")), 0))
 
     def work(source: dict):
         session = _session()  # 每个线程独立 session
+        per_source = max_per_source_for(str(source.get("name", "")), cfg["max_per_source"], weights)
         try:
-            got, err = fetch_source(source, session, cfg)
+            got, err = fetch_source(source, session, dict(cfg, max_per_source=per_source))
         except Exception as exc:
             got, err = [], f"{type(exc).__name__} {exc}"
         return source, got, err
@@ -395,4 +408,20 @@ def fetch_all(sources: list, settings: dict | None = None) -> tuple:
             items.extend(got)
             if err and not got:
                 errors.append({"source": source.get("name", "?"), "error": err})
+    # 排序稳定：同一来源内部保持原顺序，只是把加权来源整体提前
+    items.sort(key=lambda it: -weights.get(str(it.get("source", "")), 0))
     return items, errors
+
+
+def max_per_source_for(name: str, base: int, weights: dict | None = None) -> int:
+    """按来源权重决定这个源抓多少条（降权减半但至少 3 条，加权上调但不超过 2N）。"""
+    base = max(1, int(base))
+    try:
+        weight = int((weights or {}).get(name, 0) or 0)
+    except (TypeError, ValueError):
+        weight = 0
+    if weight <= WEIGHT_DEPRIORITY:
+        return max(WEIGHT_FLOOR_ITEMS, base // 2)
+    if weight >= WEIGHT_PRIORITY:
+        return int(base * 1.5)      # 加权来源优先：条数上调 50%
+    return base

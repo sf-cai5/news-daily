@@ -30,7 +30,13 @@ window.NewsApp = (function () {
       historyEmpty: '没有匹配的历史新闻。', readonly: '历史只读',
       failedSources: '失败源 ', refreshDone: '刷新完成',
       manual: '人工', auto: '自动判定', tier: '来源分级', myScore: '我的评分',
-      note: '备注（可选）', rateHint: '点击星星评分'
+      note: '备注（可选）', rateHint: '点击星星评分',
+      voteUp: '👍 点赞', voteDown: '👎 点踩', voteUpHint: '点赞：该来源权重 +1',
+      voteDownHint: '点踩：该来源权重 -1，本条从今日页隐藏',
+      hiddenToast: '已隐藏，可在历史页查看', voteUpToast: '已点赞，来源权重 +1',
+      unhide: '取消隐藏', unhiddenToast: '已取消隐藏',
+      hiddenTag: '已隐藏', allHidden: '全部（含已隐藏）', onlyHidden: '只看已隐藏',
+      hideHidden: '隐藏的不看', weight: '权重', weightHint: '来源权重（点👍/👎累积，范围 -10 ~ +10）'
     },
     en: {
       loading: 'Loading…', refresh: 'Refresh', refreshing: 'Fetching…', queueing: 'Queued…',
@@ -57,7 +63,13 @@ window.NewsApp = (function () {
       historyEmpty: 'No history matches.', readonly: 'history is read-only',
       failedSources: 'Failed sources: ', refreshDone: 'Refresh finished',
       manual: 'manual', auto: 'auto', tier: 'Source tier', myScore: 'My rating',
-      note: 'Note (optional)', rateHint: 'Click stars to rate'
+      note: 'Note (optional)', rateHint: 'Click stars to rate',
+      voteUp: '👍 Up', voteDown: '👎 Down', voteUpHint: 'Thumbs up: this source +1 weight',
+      voteDownHint: 'Thumbs down: this source -1 weight and hide this item today',
+      hiddenToast: 'Hidden — still available in History', voteUpToast: 'Upvoted: source weight +1',
+      unhide: 'Unhide', unhiddenToast: 'Unhidden',
+      hiddenTag: 'Hidden', allHidden: 'All (incl. hidden)', onlyHidden: 'Hidden only',
+      hideHidden: 'Hide hidden', weight: 'Weight', weightHint: 'Source weight (👍/👎, range -10 to +10)'
     }
   };
 

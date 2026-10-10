@@ -33,6 +33,16 @@
     return (map[name] && map[name].tier) || 4;
   }
 
+  /* 来源当前权重：默认不显示，鼠标悬停时才在 title 里看到（spec v2.3 第 5 节） */
+  function weightOf(item, name) {
+    var map = (item && item.source_weights) || (meta && meta.source_weights) || {};
+    return Number(map[name] || 0);
+  }
+
+  function weightText(weight) {
+    return t().weight + ' ' + (weight > 0 ? '+' + weight : String(weight));
+  }
+
   function credLabel(cred) {
     var en = (meta && meta.credibility_en && meta.credibility_en[cred]) || '';
     return esc(cred + (en ? ' / ' + en : ''));
@@ -158,8 +168,22 @@
       (list.length > 1 ? '（' + esc(t().sourceCount(list.length)) + '）' : '')) + '</summary><ul>' +
       list.map(function (s) {
         var tier = tierOf(s);
-        return '<li><span class="tag t' + tier + '">T' + tier + '</span> ' + esc(s) + '</li>';
+        var weight = weightOf(item, s);
+        // 权重默认不显示，只有鼠标悬停在来源上才看到（spec v2.3 第 5 节）
+        return '<li class="srow" title="' + esc(weightText(weight)) + '">' +
+          '<span class="tag t' + tier + '">T' + tier + '</span> ' + esc(s) +
+          '<span class="wtag">' + esc(weight > 0 ? '+' + weight : String(weight)) + '</span></li>';
       }).join('') + '</ul></details>';
+  }
+
+  /* spec v2.3：👍 / 👎 */
+  function votesHtml(item) {
+    var vote = item.user_vote || 'none';
+    return '<span class="votes">' +
+      '<button class="vote' + (vote === 'up' ? ' on' : '') + '" type="button" data-role="vote-up" title="' +
+        esc(t().voteUpHint) + '">👍</button>' +
+      '<button class="vote' + (vote === 'down' ? ' on' : '') + '" type="button" data-role="vote-down" title="' +
+        esc(t().voteDownHint) + '">👎</button></span>';
   }
 
   function publishedHtml(item) {
@@ -186,7 +210,7 @@
       '<article class="card" data-id="' + item.id + '">' +
         '<div class="card-top">' +
           '<span class="tag domain">' + A.bi(dom.zh, dom.en) + '</span>' +
-          credControl(item) + hotspotTag(item) + transBadge(item) +
+          credControl(item) + hotspotTag(item) + transBadge(item) + votesHtml(item) +
         '</div>' +
         // 可信度必须带上判定依据：`单一来源（中国新闻网 / Tier 3）`
         '<div class="cred-basis" title="' + esc(cred + '（' + basis + '）') + '">' +
@@ -225,7 +249,8 @@
   function render() {
     var container = el('cards');
     if (!container || !news) { return; }
-    var items = news.items || [];
+    // 点踩过的新闻后端已经不下发，这里再兜一道，保证卡片立刻消失（spec v2.3 第 5 节）
+    var items = (news.items || []).filter(function (i) { return !i.hidden; });
     container.innerHTML = '';                      // 渲染前先清空，避免叠卡片
     if (!items.length) {
       container.innerHTML = '<p class="empty">' +
@@ -396,6 +421,32 @@
     }).catch(function () { A.toast(t().failed); });
   }
 
+  /* spec v2.3：👍 权重 +1；👎 权重 -1 且本条从今日页消失（历史页仍可查、可取消隐藏） */
+  function paintVote(card, vote) {
+    if (!card) { return; }
+    var up = card.querySelector('[data-role="vote-up"]');
+    var down = card.querySelector('[data-role="vote-down"]');
+    if (up) { up.classList.toggle('on', vote === 'up'); }
+    if (down) { down.classList.toggle('on', vote === 'down'); }
+  }
+
+  function sendVote(item, card, action) {
+    return A.post('/api/news/' + item.id + '/vote', { action: action }).then(function (res) {
+      if (!res || !res.ok) { A.toast((res && res.error) || t().failed); return; }
+      item.user_vote = res.user_vote;
+      item.hidden = !!res.hidden;
+      if (action === 'down') {
+        if (card && card.parentNode) { card.parentNode.removeChild(card); }
+        A.toast(t().hiddenToast);
+        load();                                   // 重新取一次列表，分页与配额对齐
+        return;
+      }
+      paintVote(card, res.user_vote);
+      A.toast(res.message || t().voteUpToast);
+      load();
+    }).catch(function () { A.toast(t().failed); });
+  }
+
   function bindEvents() {
     if (eventsBound) { return; }          // 事件只绑一次
     eventsBound = true;
@@ -453,7 +504,9 @@
         var role = roleEl ? roleEl.getAttribute('data-role') : '';
         if (role === 'star') {
           saveScore(item, card, Number(roleEl.getAttribute('data-v')), card.querySelector('[data-role="note"]'));
-        } else if (role === 'copy-oral') { A.copyText(item.oral_prompt || ''); }
+        } else if (role === 'vote-up') { sendVote(item, card, 'up'); }
+        else if (role === 'vote-down') { sendVote(item, card, 'down'); }
+        else if (role === 'copy-oral') { A.copyText(item.oral_prompt || ''); }
         else if (role === 'copy-trans') { A.copyText(item.translation_prompt || ''); }
         else if (role === 'copy-hot') { A.copyText(item.hotspot_prompt || ''); }
         else if (role === 'fill-trans') { fillTranslationModal(item); }

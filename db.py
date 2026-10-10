@@ -1,8 +1,9 @@
-"""SQLite 操作层（spec v2 数据模型）。
+"""SQLite 操作层（spec v2 数据模型 + v2.3 投票/来源权重）。
 
 按 spec 第 9 节：不引入 ORM，直接写 SQL。
-表：news（业务数据，url + module 联合唯一）、meta（运行状态键值）。
-本文件同时负责把 v1 的旧库（只有 url 唯一约束）迁移到 v2 结构。
+表：news（业务数据，url + module 联合唯一）、source_weights（来源权重）、meta（运行状态键值）。
+本文件同时负责把 v1 的旧库（只有 url 唯一约束）迁移到 v2 结构，
+并在启动时补上 v2.3 的三列（user_vote / hidden / hidden_at）与 source_weights 表。
 """
 
 from __future__ import annotations
@@ -25,6 +26,15 @@ DOMAIN_MODULES = ["ai", "livelihood", "society_cn", "society_intl"]
 
 TRANSLATION_STATUS = ["已翻译", "未翻译", "部分"]
 HOTSPOT_STATUS = ["已生成", "未生成"]
+
+# spec v2.3：👍/👎 投票与来源权重
+VOTE_VALUES = ["up", "down", "none"]
+# 每种态度对来源权重的贡献：👍 +1，👎 -1，没态度 0（权重永远等于当前态度，不累加刷分）
+VOTE_CONTRIBUTION = {"up": 1, "down": -1, "none": 0}
+WEIGHT_MIN = -10           # 下限：不得无限下降
+WEIGHT_MAX = 10            # 上限：不得无限增长
+WEIGHT_DECAY_RATIO = 0.9   # 每月自动衰减 10%
+WEIGHT_DECAY_KEY = "weight_decay_month"   # meta 里记录上次衰减的月份，保证每月只衰减一次
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS news (
@@ -52,6 +62,9 @@ CREATE TABLE IF NOT EXISTS news (
     hotspot_status      TEXT,
     user_score          INTEGER,
     user_note           TEXT,
+    user_vote           TEXT DEFAULT 'none',
+    hidden              INTEGER DEFAULT 0,
+    hidden_at           TEXT,
     published_at        TEXT,
     published_at_source TEXT,
     shown_at            TEXT,
@@ -68,6 +81,16 @@ CREATE INDEX IF NOT EXISTS idx_news_credibility  ON news(credibility);
 CREATE INDEX IF NOT EXISTS idx_news_module       ON news(module);
 CREATE INDEX IF NOT EXISTS idx_news_published_at ON news(published_at);
 CREATE INDEX IF NOT EXISTS idx_news_module_shown ON news(module, module_shown_at);
+-- 注意：idx_news_hidden 不能在 SCHEMA 里建。老库的 news 表还没有 hidden 列，
+-- 而 ALTER TABLE 补列是在 executescript(SCHEMA) 之后才跑的，这里建索引会报 no such column。
+-- 于是它统一在 init_db() 的补列循环之后创建（见 init_db）。
+
+-- spec v2.3：来源权重（点👍来源 +1、点👎来源 -1，范围 -10 ~ +10）
+CREATE TABLE IF NOT EXISTS source_weights (
+    source_name TEXT PRIMARY KEY,
+    weight      INTEGER DEFAULT 0,
+    updated_at  TEXT
+);
 
 CREATE TABLE IF NOT EXISTS meta (
     k TEXT PRIMARY KEY,
@@ -96,6 +119,10 @@ NEW_COLUMNS = [
     ("user_score", "INTEGER"),
     ("user_note", "TEXT"),
     ("url_key", "TEXT"),
+    # spec v2.3 的三列迁移（老库没有表结构时会在这里逐列补上）
+    ("user_vote", "TEXT DEFAULT 'none'"),
+    ("hidden", "INTEGER DEFAULT 0"),
+    ("hidden_at", "TEXT"),
 ]
 
 
@@ -242,6 +269,8 @@ def init_db() -> dict:
             if name not in cols:
                 conn.execute(f"ALTER TABLE news ADD COLUMN {name} {ddl}")
                 actions.append(f"added_column:{name}")
+        # hidden 列补好之后才建索引（老库升级路径，见 SCHEMA 里的注释）
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_news_hidden ON news(hidden)")
         # 补齐元数据字段，保证查询排序稳定
         conn.execute("UPDATE news SET module = 'comprehensive' WHERE module IS NULL OR module = ''")
         conn.execute("UPDATE news SET title_zh = title WHERE title_zh IS NULL AND source_lang = 'zh'")
@@ -251,6 +280,9 @@ def init_db() -> dict:
         conn.execute("UPDATE news SET published_at_source = 'unknown' WHERE published_at_source IS NULL")
         conn.execute("UPDATE news SET shown_at = created_at WHERE shown_at IS NULL")
         conn.execute("UPDATE news SET module_shown_at = shown_at WHERE module_shown_at IS NULL")
+        # spec v2.3：老数据默认没投过票、没被隐藏
+        conn.execute("UPDATE news SET user_vote = 'none' WHERE user_vote IS NULL OR user_vote = ''")
+        conn.execute("UPDATE news SET hidden = 0 WHERE hidden IS NULL")
         # 老数据没有 credibility_auto：把当前标签视为自动判定结果
         conn.execute("UPDATE news SET credibility_auto = credibility WHERE credibility_auto IS NULL")
         conn.execute(
@@ -273,8 +305,8 @@ FIELDS = [
     "module", "domain", "title", "title_zh", "title_en", "url", "url_key", "sources", "summary",
     "summary_zh", "summary_en", "source_lang", "translation_status", "credibility",
     "credibility_auto", "credibility_basis", "conflict_note", "oral_prompt", "hotspot_score",
-    "highlight", "hotspot_status", "user_score", "user_note", "published_at",
-    "published_at_source", "shown_at", "module_shown_at", "created_at",
+    "highlight", "hotspot_status", "user_score", "user_note", "user_vote", "hidden", "hidden_at",
+    "published_at", "published_at_source", "shown_at", "module_shown_at", "created_at",
 ]
 
 
@@ -294,6 +326,10 @@ def insert_news(item: dict, module: str, module_shown_at: str) -> bool:
         row["hotspot_status"] = "未生成"
     if not row.get("published_at_source"):
         row["published_at_source"] = "unknown"
+    # spec v2.3：新入库的一律没投过票、没被隐藏
+    row["user_vote"] = row.get("user_vote") or "none"
+    if row.get("hidden") is None:
+        row["hidden"] = 0
     if isinstance(row.get("sources"), (list, dict)):
         row["sources"] = json.dumps(row["sources"], ensure_ascii=False)
     row["sources"] = row.get("sources") or "[]"
@@ -369,6 +405,212 @@ def update_user_score(news_id: int, score, note: str | None) -> dict | None:
     return dict(row)
 
 
+# ---------------------------------------------------------------- 来源权重（spec v2.3）
+
+def clamp_weight(value) -> int:
+    """权重限死在 -10 ~ +10：不无限增长，也不无限下降。"""
+    try:
+        weight = int(value)
+    except (TypeError, ValueError):
+        weight = 0
+    return max(WEIGHT_MIN, min(WEIGHT_MAX, weight))
+
+
+def source_weights_map() -> dict:
+    """来源名 → 权重（没记录过的来源视为 0）。表还不存在时返回空字典。"""
+    try:
+        with connect() as conn:
+            rows = conn.execute("SELECT source_name, weight FROM source_weights").fetchall()
+    except sqlite3.OperationalError:
+        return {}
+    return {r["source_name"]: clamp_weight(r["weight"]) for r in rows}
+
+
+def source_weight_rows() -> list:
+    """给 /api/source-weights 用：全部有记录的来源，权重高的在前。"""
+    try:
+        with connect() as conn:
+            rows = conn.execute(
+                "SELECT source_name, weight, updated_at FROM source_weights "
+                "ORDER BY weight DESC, source_name"
+            ).fetchall()
+    except sqlite3.OperationalError:
+        return []
+    return [{"source_name": r["source_name"], "weight": clamp_weight(r["weight"]),
+             "updated_at": r["updated_at"] or ""} for r in rows]
+
+
+def get_source_weight(name: str) -> int:
+    return source_weights_map().get(name or "", 0)
+
+
+def _upsert_weight(conn, name: str, delta: int, at: str | None = None) -> int:
+    """同一个连接里「读 → 加 delta → 夹到 -10~+10 → 写回」，返回新权重。"""
+    row = conn.execute("SELECT weight FROM source_weights WHERE source_name = ?", (name,)).fetchone()
+    current = clamp_weight(row["weight"]) if row else 0
+    new = clamp_weight(current + int(delta))
+    conn.execute(
+        "INSERT INTO source_weights (source_name, weight, updated_at) VALUES (?, ?, ?) "
+        "ON CONFLICT(source_name) DO UPDATE SET weight = excluded.weight, updated_at = excluded.updated_at",
+        (name, new, at or now_iso()),
+    )
+    return new
+
+
+def set_source_weight(name: str, weight) -> int:
+    """直接设置权重（人工校正 / 自检用），仍会夹在 -10 ~ +10。"""
+    name = (name or "").strip()
+    value = clamp_weight(weight)
+    if not name:
+        return value
+    with connect() as conn:
+        conn.execute(
+            "INSERT INTO source_weights (source_name, weight, updated_at) VALUES (?, ?, ?) "
+            "ON CONFLICT(source_name) DO UPDATE SET weight = excluded.weight, updated_at = excluded.updated_at",
+            (name, value, now_iso()),
+        )
+    return value
+
+
+def decay_weight(value, ratio: float = WEIGHT_DECAY_RATIO) -> int:
+    """每月衰减 10%：向 0 靠拢但不变号（8 → 7，-8 → -7，1 → 0）。"""
+    try:
+        weight = int(value)
+    except (TypeError, ValueError):
+        return 0
+    return clamp_weight(int(weight * ratio))
+
+
+def current_month(now: datetime | None = None) -> str:
+    return (now or datetime.now()).strftime("%Y-%m")
+
+
+def decay_state(now: datetime | None = None) -> dict:
+    """权重衰减状态：上一次衰减的月份、当前月份、本月是否还没衰减。"""
+    month = current_month(now)
+    last = get_meta().get(WEIGHT_DECAY_KEY) or ""
+    return {"ratio": WEIGHT_DECAY_RATIO, "last_month": last, "month": month,
+            "pending": last != month}
+
+
+def decay_source_weights(now: datetime | None = None, force: bool = False) -> dict:
+    """每月自动衰减 10%，防止偏见累积；同一个月只衰减一次（月份记在 meta 里）。"""
+    now = now or datetime.now()
+    month = now.strftime("%Y-%m")
+    last = get_meta().get(WEIGHT_DECAY_KEY)
+    if not force and last == month:
+        return {"decayed": False, "month": month, "last_month": last, "sources": 0}
+    changed = 0
+    with connect() as conn:
+        rows = conn.execute("SELECT source_name, weight FROM source_weights").fetchall()
+        for r in rows:
+            old, new = clamp_weight(r["weight"]), decay_weight(r["weight"])
+            if new != old:
+                conn.execute(
+                    "UPDATE source_weights SET weight = ?, updated_at = ? WHERE source_name = ?",
+                    (new, now_iso(), r["source_name"]),
+                )
+                changed += 1
+        conn.execute(
+            "INSERT INTO meta (k, v) VALUES (?, ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v",
+            (WEIGHT_DECAY_KEY, json.dumps(month, ensure_ascii=False)),
+        )
+    return {"decayed": True, "month": month, "last_month": last, "sources": changed}
+
+
+def _source_names(row) -> list:
+    """一条新闻的来源名列表（sources 是 JSON 数组文本）。"""
+    try:
+        return [str(s) for s in json.loads(row["sources"] or "[]") if s]
+    except (TypeError, ValueError):
+        return []
+
+
+def update_vote(news_id: int, action: str) -> dict | None:
+    """👍/👎：写 user_vote、按需隐藏，并同步该条来源的权重。
+
+    - up：user_vote=up，取消隐藏；该来源权重 +1
+    - down：user_vote=down，hidden=1，记 hidden_at；该来源权重 -1
+    - none：撤销投票：解除隐藏，权重回到「没态度」
+
+    权重永远等于「当前态度」而不是累加点击次数：同一种态度连点多次只算一次
+    （👍→👍 不变），从赞改成踩就是 -2（把那次 +1 也撤掉），所以反复点踩最多把
+    权重压到 -10，符合 spec「不得无限下降」。
+    """
+    action = (action or "").strip().lower()
+    if action not in VOTE_VALUES:
+        return None
+    at = now_iso()
+    with connect() as conn:
+        row = conn.execute("SELECT * FROM news WHERE id = ?", (news_id,)).fetchone()
+        if not row:
+            return None
+        prev = (row["user_vote"] or "none").lower()
+        if prev not in VOTE_CONTRIBUTION:
+            prev = "none"
+        delta = VOTE_CONTRIBUTION[action] - VOTE_CONTRIBUTION[prev]
+        weights = {}
+        if delta:
+            for name in _source_names(row):
+                weights[name] = _upsert_weight(conn, name, delta, at)
+        if action == "down":
+            conn.execute("UPDATE news SET user_vote = 'down', hidden = 1, hidden_at = ? WHERE id = ?",
+                         (at, news_id))
+        else:
+            conn.execute("UPDATE news SET user_vote = ?, hidden = 0, hidden_at = NULL WHERE id = ?",
+                         ("up" if action == "up" else "none", news_id))
+        updated = conn.execute("SELECT * FROM news WHERE id = ?", (news_id,)).fetchone()
+    out = dict(updated)
+    out["weights"] = weights
+    out["weight_delta"] = delta
+    out["previous_vote"] = prev
+    return out
+
+
+def unhide_news(news_id: int) -> dict | None:
+    """取消隐藏：恢复展示，并撤销那次点踩（权重 +1 回退）。
+
+    隐藏是按 url_key 生效的（同一条新闻的多个模块行一起从今日页消失），
+    所以取消隐藏也按 url_key 一起恢复，避免「综合行还藏着」的残留状态。
+    """
+    at = now_iso()
+    with connect() as conn:
+        row = conn.execute("SELECT * FROM news WHERE id = ?", (news_id,)).fetchone()
+        if not row:
+            return None
+        key = row["url_key"] or url_key(row["url"] or "")
+        siblings = conn.execute(
+            "SELECT * FROM news WHERE IFNULL(url_key, url) = ?", (key,)
+        ).fetchall()
+        weights, restored = {}, []
+        for r in siblings:
+            prev = (r["user_vote"] or "none").lower()
+            if prev == "down":            # 只有真的点过踩的行才回退权重
+                for name in _source_names(r):
+                    weights[name] = _upsert_weight(conn, name, 1, at)
+                conn.execute(
+                    "UPDATE news SET user_vote = 'none', hidden = 0, hidden_at = NULL WHERE id = ?",
+                    (r["id"],),
+                )
+            else:
+                conn.execute("UPDATE news SET hidden = 0, hidden_at = NULL WHERE id = ?", (r["id"],))
+            restored.append(r["id"])
+        updated = conn.execute("SELECT * FROM news WHERE id = ?", (news_id,)).fetchone()
+    out = dict(updated)
+    out["weights"] = weights
+    out["weight_delta"] = 1 if weights else 0
+    out["previous_vote"] = (row["user_vote"] or "none").lower()
+    out["restored_ids"] = restored
+    return out
+
+
+def hidden_url_keys() -> set:
+    """被隐藏新闻的 url_key 集合：今日页据此整条隐藏（跨模块一起消失）。"""
+    with connect() as conn:
+        rows = conn.execute("SELECT url, url_key FROM news WHERE hidden = 1").fetchall()
+    return {(r["url_key"] or url_key(r["url"])) for r in rows}
+
+
 def translation_status_of(row: dict) -> str:
     """按译文完整度判定：两个语种都齐=已翻译，一条都没有=未翻译，其余=部分。"""
     source_lang = row.get("source_lang") or "zh"
@@ -389,6 +631,33 @@ def translation_status_of(row: dict) -> str:
 
 
 # ---------------------------------------------------------------- 读取
+
+def _json1_available() -> bool:
+    """排序要按来源权重，需要 json_extract；没有 JSON1 就退化成纯时间排序。"""
+    global _JSON1
+    if _JSON1 is None:
+        try:
+            sqlite3.connect(":memory:").execute("SELECT json_valid('[]')").fetchone()
+            _JSON1 = True
+        except sqlite3.Error:
+            _JSON1 = False
+    return _JSON1
+
+
+_JSON1 = None
+
+# 该行的来源权重：取第一个来源（sources JSON 数组的第一个元素）在 source_weights 里的权重
+_WEIGHT_KEY = (
+    "COALESCE((SELECT w.weight FROM source_weights w WHERE w.source_name = "
+    "CASE WHEN json_valid(news.sources) THEN json_extract(news.sources, '$[0]') END), 0)"
+)
+
+# spec v2.3：点踩过的新闻从今日页消失（同一 url_key 的所有模块行一起消失）
+_HIDDEN_EXCLUDE = (
+    "COALESCE(url_key, url) NOT IN "
+    "(SELECT COALESCE(url_key, url) FROM news WHERE hidden = 1)"
+)
+
 
 def row_to_dict(row) -> dict:
     d = dict(row)
@@ -430,22 +699,32 @@ def _filters(where: list, params: list, domain=None, credibility=None, module=No
 
 
 def _order(sort: str) -> str:
+    """排序：权重高的来源优先排在前面（spec v2.3 第 3.1 节），其余部分保持原规则。
+
+    没有点过赞/踩时全部权重为 0，等于不参与排序，所以默认仍是「发布时间倒序」
+    （spec v2 第 4 节），只有真的投过票的来源才会被提前/压后。
+    """
+    weight_key = f"{_WEIGHT_KEY} DESC, " if _json1_available() else ""
     if sort == "hotspot":
-        return "ORDER BY (hotspot_score IS NULL), hotspot_score DESC, (published_at IS NULL), published_at DESC"
+        return (f"ORDER BY {weight_key}(hotspot_score IS NULL), hotspot_score DESC, "
+                "(published_at IS NULL), published_at DESC")
     if sort == "shown":
         return "ORDER BY module_shown_at DESC, id DESC"
+    if sort == "user_score":
+        return f"ORDER BY {weight_key}(user_score IS NULL), user_score DESC, id DESC"
     # 默认：新闻发布时间倒序，时间未知排最后
-    return "ORDER BY (published_at IS NULL), published_at DESC, id DESC"
+    return f"ORDER BY {weight_key}(published_at IS NULL), published_at DESC, id DESC"
 
 
 def today_items(module: str, page: int = 1, page_size: int = 10, sort: str = "published",
                 day: str | None = None, **kw) -> tuple:
     """某模块“今日”条目：今天展示过的全部（一天内多次刷新会累积），分页返回。
 
-    模块内 url_key 有唯一索引，所以这里天然不会有重复卡片。
+    模块内 url_key 有唯一索引，所以这里天然不会有重复卡片；
+    点过踩（hidden=1）的新闻整条隐藏，不出现在今日页（spec v2.3 第 2 节）。
     """
     day = day or datetime.now().strftime("%Y-%m-%d")
-    where, params = ["module = ?", "substr(module_shown_at, 1, 10) = ?"], [module, day]
+    where, params = ["module = ?", "substr(module_shown_at, 1, 10) = ?", _HIDDEN_EXCLUDE], [module, day]
     _filters(where, params, **kw)
     where_sql = " AND ".join(where)
     offset = max(0, (page - 1) * page_size)
@@ -459,8 +738,8 @@ def today_items(module: str, page: int = 1, page_size: int = 10, sort: str = "pu
 
 
 def latest_module_batch(module: str, limit: int = 60, **kw) -> list:
-    """该模块最近一次刷新的批次（综合模块按配额混合时从这里取）。"""
-    where, params = ["module = ?"], [module]
+    """该模块最近一次刷新的批次（综合模块按配额混合时从这里取）。隐藏的不参与混合。"""
+    where, params = ["module = ?", _HIDDEN_EXCLUDE], [module]
     _filters(where, params, **kw)
     where_sql = " AND ".join(where)
     with connect() as conn:
@@ -479,16 +758,23 @@ def latest_module_batch(module: str, limit: int = 60, **kw) -> list:
 
 
 def history_items(page: int = 1, page_size: int = 20, date: str | None = None,
-                  sort: str = "published", dedup: bool = True, **kw) -> tuple:
+                  sort: str = "published", dedup: bool = True,
+                  hidden: str | None = None, **kw) -> tuple:
     """历史列表：可按日期/模块/可信度/我的评分/关键词筛选，只读。
 
     dedup=True 时按 url_key 跨模块去重：同一条新闻可能既在综合又在 AI 模块里，
     历史列表只显示一条（优先保留领域模块那一行，它信息更具体）。
+    hidden：None=全部（含已隐藏）；'only'=只看已隐藏；'visible'=隐藏的不显示。
+    被点踩的新闻在历史里照样查得到，并带上「已隐藏」标记（spec v2.3 第 2 节）。
     """
     where, params = [], []
     if date:
         where.append("(substr(published_at, 1, 10) = ? OR (published_at IS NULL AND substr(module_shown_at, 1, 10) = ?))")
         params.extend([date, date])
+    if hidden == "only":
+        where.append("hidden = 1")
+    elif hidden == "visible":
+        where.append("COALESCE(hidden, 0) = 0")
     _filters(where, params, **kw)
     where_sql = (" WHERE " + " AND ".join(where)) if where else ""
     offset = max(0, (page - 1) * page_size)
@@ -514,7 +800,16 @@ def history_items(page: int = 1, page_size: int = 20, date: str | None = None,
                 f"SELECT * FROM news{where_sql} {_order(sort)} LIMIT ? OFFSET ?",
                 params + [page_size, offset],
             ).fetchall()
-    return [row_to_dict(r) for r in rows], total
+    out = [row_to_dict(r) for r in rows]
+    # 去重后留下的那一行可能不是被隐藏的那一行，这里按 url_key 统一补上隐藏标记
+    keys = hidden_url_keys()
+    for item in out:
+        key = item.get("url_key") or url_key(item.get("url") or "")
+        own = bool(item.get("hidden"))
+        if own or key in keys:
+            item["hidden"] = 1
+            item["hidden_basis"] = "" if own else "同一条新闻在其它模块被标记为已隐藏"
+    return out, total
 
 
 def get_news(news_id: int) -> dict | None:
@@ -553,12 +848,12 @@ def module_dates(module: str) -> list:
 
 
 def module_counts(module: str, day: str | None = None) -> dict:
-    """今日该模块的条数与热点分布，用于配额显示。"""
+    """今日该模块的条数与热点分布，用于配额显示（被点踩隐藏的不计入）。"""
     day = day or datetime.now().strftime("%Y-%m-%d")
     with connect() as conn:
         rows = conn.execute(
             "SELECT domain, credibility, hotspot_score FROM news "
-            "WHERE module = ? AND substr(module_shown_at, 1, 10) = ?",
+            f"WHERE module = ? AND substr(module_shown_at, 1, 10) = ? AND {_HIDDEN_EXCLUDE}",
             (module, day),
         ).fetchall()
     by_domain, hot, normal, unscored = {}, 0, 0, 0

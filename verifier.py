@@ -10,6 +10,9 @@ v2.1 起可信度按 sources.json 里的 Tier 等级自动判定（结果写 cre
 4. 只有 1 个源 → 单一来源
 5. 其余（≥2 个源但全是 Tier 3–4）→ 存疑
 
+v2.3 起支持传 weights（来源名 → 权重）做微调：Tier 2 且权重 ≥ +5 视为 Tier 1.5，
+Tier 2 且权重 ≤ -5 降为 Tier 3；不传 weights 时行为与 v2.2 完全一致。
+
 另外做两件事：
 - 抽取关键实体（机构、数字、拉丁词、引号内容）作为“同一事件”的判据；
 - 把同一事件的多来源合并成一条，sources 列表保留全部来源。
@@ -34,6 +37,12 @@ CREDIBILITY_EN = {
 CREDIBILITY_RANK = {"已证实": 4, "较可信": 3, "单一来源": 2, "存疑": 1}
 # Tier 数字越小越权威，这里换算成“越大越好”的排序权重
 TIER_RANK = {1: 4, 2: 3, 3: 2, 4: 1}
+
+# spec v2.3 第 3.2 节：来源权重对可信度判定做微调（只动 Tier 2，不覆盖原规则）
+WEIGHT_UPGRADE = 5        # 权重 ≥ +5 的 Tier 2 源视为 Tier 1.5
+WEIGHT_DOWNGRADE = -5     # 权重 ≤ -5 的 Tier 2 源降为 Tier 3
+TIER_UPGRADED = 1.5       # 升级后的等效等级
+TIER_DOWNGRADED = 3.0     # 降级后的等效等级
 
 TIER_LABELS = {
     1: {"zh": "Tier 1 官方权威", "en": "Tier 1 Official"},
@@ -240,19 +249,61 @@ def tier_pairs(group: dict) -> list:
     return pairs
 
 
-def credibility_basis(group: dict) -> str:
-    """判定依据，直接显示在卡片上：`中国新闻网 / Tier 3，澎湃新闻 / Tier 2`。"""
-    return "，".join(f"{name} / Tier {tier}" for name, tier in tier_pairs(group))
+def credibility_basis(group: dict, weights: dict | None = None) -> str:
+    """判定依据，直接显示在卡片上：`中国新闻网 / Tier 3，澎湃新闻 / Tier 2`。
+
+    来源权重生效时把微调一并写出来：
+    `量子位 / Tier 2（权重 +5 → Tier 1.5）`、`IT之家 / Tier 2（权重 -5 → Tier 3）`。
+    """
+    parts = []
+    for name, tier in tier_pairs(group):
+        weight = _weight_of(name, weights)
+        effective = effective_tier(name, tier, weights)
+        if effective != float(tier):
+            parts.append(f"{name} / Tier {tier}（权重 {weight:+d} → Tier {_tier_text(effective)}）")
+        else:
+            parts.append(f"{name} / Tier {tier}")
+    return "，".join(parts)
 
 
-def judge_credibility(group: dict) -> str:
-    """按来源 Tier 自动判定可信度（spec v2.2 第 3 节）。
+def _weight_of(name: str, weights: dict | None) -> int:
+    if not weights:
+        return 0
+    try:
+        return int(weights.get(name, 0) or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _tier_text(tier: float) -> str:
+    """1.5 → '1.5'，3.0 → '3'。"""
+    return str(int(tier)) if float(tier).is_integer() else str(tier)
+
+
+def effective_tier(name: str, tier: int, weights: dict | None = None) -> float:
+    """按来源权重微调 Tier（spec v2.3 第 3.2 节，只动 Tier 2）。
+
+    - 权重 ≥ +5 的 Tier 2 源 → 视为 Tier 1.5（可参与「已证实」判定）
+    - 权重 ≤ -5 的 Tier 2 源 → 降为 Tier 3（会把该事件拉到「存疑」）
+    - 其余保持原 Tier
+    """
+    weight = _weight_of(name, weights)
+    if tier == 2 and weight >= WEIGHT_UPGRADE:
+        return TIER_UPGRADED
+    if tier == 2 and weight <= WEIGHT_DOWNGRADE:
+        return TIER_DOWNGRADED
+    return float(tier)
+
+
+def judge_credibility(group: dict, weights: dict | None = None) -> str:
+    """按来源 Tier 自动判定可信度（spec v2.2 第 3 节 + v2.3 第 3.2 节权重微调）。
 
     规则（严格按 Tier 与来源数，不看别的）：
     1. 只有 1 个源 → 单一来源（不管它是 Tier 几）
     2. 来源之间有冲突 → 存疑
-    3. 出现 Tier 3 或 Tier 4 的源 → 存疑
-    4. 全是 Tier 1 / Tier 2：同时有 T1 与 T2 → 已证实；只有 T2 → 较可信；只有 T1 → 已证实
+    3. 出现 Tier 3 或 Tier 4 的源（含被权重降级到 Tier 3 的）→ 存疑
+    4. 全是 Tier 1 / Tier 2（含被判为 Tier 1.5 的）：有官方级 + 主流级 → 已证实；
+       只有主流级 → 较可信；只有官方级 → 已证实
     """
     pairs = tier_pairs(group)
     if not pairs:
@@ -261,13 +312,15 @@ def judge_credibility(group: dict) -> str:
         return "单一来源"
     if conflict_points(group):
         return "存疑"
-    tiers = [tier for _name, tier in pairs]
+    tiers = [effective_tier(name, tier, weights) for name, tier in pairs]
     if any(tier >= 3 for tier in tiers):
-        return "存疑"          # 混进了 Tier 3–4 的源
-    if 1 in tiers and 2 in tiers:
-        return "已证实"
-    if 1 in tiers:
-        return "已证实"        # 两个及以上 Tier 1 官方源，事实一致（spec 未列，按更强处理）
-    if 2 in tiers:
+        return "存疑"          # 混进了 Tier 3–4 的源（含被降级的 Tier 2）
+    official = [t for t in tiers if t <= TIER_UPGRADED]
+    mainstream = [t for t in tiers if TIER_UPGRADED < t < 3]
+    if official and mainstream:
+        return "已证实"        # 官方级 + 主流级（Tier 1/Tier 1.5 + Tier 2）
+    if official:
+        return "已证实"        # 两个及以上官方级源，事实一致（spec 未列，按更强处理）
+    if mainstream:
         return "较可信"        # 只有 Tier 2
     return "存疑"

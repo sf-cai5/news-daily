@@ -23,8 +23,8 @@ import fetcher
 from dedup import dedup_url, is_duplicate, normalize_title, url_key
 from prompt_builder import build_hotspot_prompt, build_prompt, build_translation_prompt
 from verifier import (CREDIBILITY_EN, CREDIBILITY_LEVELS, CREDIBILITY_RANK, TIER_LABELS,
-                      TIER_RANK, conflict_points, credibility_basis, judge_credibility,
-                      merge_events)
+                      TIER_RANK, TIER_UPGRADED, WEIGHT_DOWNGRADE, WEIGHT_UPGRADE,
+                      conflict_points, credibility_basis, judge_credibility, merge_events)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 SOURCES_FILE = os.path.join(BASE_DIR, "sources.json")
@@ -213,14 +213,15 @@ def to_row(group: dict, module: str, ts: str) -> dict:
 # ---------------------------------------------------------------- 刷新：单独模块
 
 def refresh_module(module: str) -> dict:
-    """只抓该领域源，模块内独立去重，不跨领域补位。"""
+    """只抓该领域源，模块内独立去重，不跨领域补位。来源权重影响抓取与可信度微调。"""
     sources, settings = load_config()
     domain_sources = [s for s in sources if s.get("domain") == module]
     if not domain_sources:
         return {"ok": False, "module": module, "added": 0, "skipped": 0,
                 "message": "该模块没有配置新闻源", "flags": {"shortage": True, "hotspot_short": True}}
 
-    candidates, errors = fetcher.fetch_all(domain_sources, settings)
+    weights = db.source_weights_map()          # spec v2.3：👍/👎 累积出来的来源偏好
+    candidates, errors = fetcher.fetch_all(domain_sources, settings, weights=weights)
     if not candidates:
         return {"ok": False, "module": module, "added": 0, "skipped": 0,
                 "message": "抓取失败，请稍后重试", "errors": errors[:10],
@@ -256,8 +257,9 @@ def refresh_module(module: str) -> dict:
     groups = merge_events(fresh)
     for g in groups:
         g["conflict_points"] = conflict_points(g)
-        g["credibility"] = judge_credibility(g)
-        g["credibility_basis"] = credibility_basis(g)
+        # 权重 ≥ +5 的 Tier 2 源视为 Tier 1.5、≤ -5 的降为 Tier 3（spec v2.3 第 3.2 节）
+        g["credibility"] = judge_credibility(g, weights)
+        g["credibility_basis"] = credibility_basis(g, weights)
 
     picked, flags, window_used = select_module(groups)
     if picked:
@@ -376,7 +378,7 @@ def _refresh_job(module: str) -> None:
 
 # ---------------------------------------------------------------- 序列化
 
-def present(item: dict, lang: str = "zh") -> dict:
+def present(item: dict, lang: str = "zh", weights: dict | None = None) -> dict:
     """按界面语言产出展示字段：缺译文就回退原文并标“未翻译”。"""
     out = dict(item)
     if lang == "en":
@@ -400,6 +402,14 @@ def present(item: dict, lang: str = "zh") -> dict:
     out["credibility_basis"] = item.get("credibility_basis") or basis_from_sources(item)
     out["user_score"] = item.get("user_score")
     out["user_note"] = item.get("user_note") or ""
+    # spec v2.3：投票状态 + 该条各来源的当前权重（卡片上默认不显示，hover 才显示）
+    out["user_vote"] = (item.get("user_vote") or "none")
+    out["hidden"] = bool(item.get("hidden"))
+    out["hidden_at"] = item.get("hidden_at") or ""
+    out["hidden_basis"] = item.get("hidden_basis") or ""
+    weight_map = weights if weights is not None else db.source_weights_map()
+    out["source_weights"] = {name: int(weight_map.get(name, 0) or 0)
+                             for name in (item.get("sources") or [])}
     # 三种提示词都由系统生成，用户复制出去给网页版大模型
     out["oral_prompt"] = item.get("oral_prompt") or build_prompt(item)
     out["hotspot_prompt"] = build_hotspot_prompt(item)
@@ -437,6 +447,21 @@ def basis_from_sources(item: dict) -> str:
         tier = (tiers.get(name) or {}).get("tier", 4)
         parts.append(f"{name} / Tier {tier}")
     return "，".join(parts)
+
+
+def weights_map() -> dict:
+    """当前来源权重。每个请求读一次，避免逐条卡片重复查库。"""
+    return db.source_weights_map()
+
+
+def hidden_filter() -> str | None:
+    """历史页的已隐藏筛选：'' / 'only' / 'visible'。"""
+    raw = (request.args.get("hidden") or "").strip().lower()
+    if raw in ("1", "only", "true", "yes"):
+        return "only"
+    if raw in ("0", "visible", "false", "no"):
+        return "visible"
+    return None
 
 
 def filter_kwargs() -> dict:
@@ -489,6 +514,18 @@ def api_meta():
         "hotspot_status_values": db.HOTSPOT_STATUS,
         "tier_labels": TIER_LABELS,
         "source_tiers": source_tier_map(),
+        # spec v2.3：投票与来源权重
+        "vote_values": db.VOTE_VALUES,
+        "source_weights": weights_map(),
+        "weight_range": {"min": db.WEIGHT_MIN, "max": db.WEIGHT_MAX},
+        "weight_rules": {
+            "tier2_upgrade": WEIGHT_UPGRADE, "tier2_upgraded_to": TIER_UPGRADED,
+            "tier2_downgrade": WEIGHT_DOWNGRADE, "tier2_downgraded_to": 3,
+            "fetch_priority": fetcher.WEIGHT_PRIORITY,
+            "fetch_depriority": fetcher.WEIGHT_DEPRIORITY,
+            "decay_monthly": db.WEIGHT_DECAY_RATIO,
+        },
+        "weight_decay_month": meta.get(db.WEIGHT_DECAY_KEY, ""),
         "last_refresh": {k.replace("refresh_", ""): v for k, v in meta.items() if k.startswith("refresh_")},
         "stats": db.stats(),
     })
@@ -508,6 +545,7 @@ def api_news():
     pages = max(1, (total + page_size - 1) // page_size)
     counts = db.module_counts(module)
     meta = db.get_meta()
+    wmap = weights_map()
     return jsonify({
         "ok": True,
         "module": module,
@@ -519,7 +557,7 @@ def api_news():
         "pages": pages,
         "total": total,
         "count": len(items),
-        "items": [present(i, lang) for i in items],
+        "items": [present(i, lang, wmap) for i in items],
         "counts": counts,
         "quota": COMPREHENSIVE_QUOTA if module == "comprehensive"
         else {"hot": HOT_QUOTA, "normal": NORMAL_QUOTA, "hot_threshold": HOT_THRESHOLD},
@@ -529,6 +567,8 @@ def api_news():
         "domain_labels": DOMAIN_LABELS,
         "tier_labels": TIER_LABELS,
         "source_tiers": source_tier_map(),
+        "source_weights": wmap,
+        "weight_range": {"min": db.WEIGHT_MIN, "max": db.WEIGHT_MAX},
         "refresh_state": REFRESH_STATE[module],
         "last_refresh": meta.get(f"refresh_{module}"),
         "db_total": db.stats()["total"],
@@ -574,9 +614,11 @@ def api_history():
     kw = filter_kwargs()
     if module:
         kw["module"] = module
+    hidden = hidden_filter()
     items, total = db.history_items(page=page, page_size=page_size, date=date, sort=sort,
-                                    dedup=dedup, **kw)
+                                    dedup=dedup, hidden=hidden, **kw)
     pages = max(1, (total + page_size - 1) // page_size)
+    wmap = weights_map()
     return jsonify({
         "ok": True,
         "lang": lang,
@@ -585,9 +627,10 @@ def api_history():
         "pages": pages,
         "total": total,
         "count": len(items),
-        "items": [present(i, lang) for i in items],
+        "items": [present(i, lang, wmap) for i in items],
         "dedup": dedup,
-        "filters": {"date": date, "module": module,
+        "hidden": hidden or "",
+        "filters": {"date": date, "module": module, "hidden": hidden or "",
                     **{k: v for k, v in kw.items() if k != "module"}},
         "available_dates": db.module_dates(module or "comprehensive"),
         "modules": MODULES,
@@ -597,6 +640,8 @@ def api_history():
         "credibility_en": CREDIBILITY_EN,
         "tier_labels": TIER_LABELS,
         "source_tiers": source_tier_map(),
+        "source_weights": wmap,
+        "weight_range": {"min": db.WEIGHT_MIN, "max": db.WEIGHT_MAX},
         "readonly": True,
     })
 
@@ -607,9 +652,117 @@ def api_history_detail(news_id: int):
     item = db.get_news(news_id)
     if not item:
         return jsonify({"ok": False, "error": "新闻不存在"}), 404
-    detail = present(item, lang)
+    detail = present(item, lang, weights_map())
     detail["readonly"] = True
     return jsonify({"ok": True, "item": detail})
+
+
+@app.post("/api/news/<int:news_id>/vote")
+def api_vote(news_id: int):
+    """👍/👎（spec v2.3 第 4 节）。
+
+    - up：来源权重 +1，新闻照常展示
+    - down：来源权重 -1，该新闻从今日页隐藏（历史页仍可查，可取消隐藏）
+    绝不删除新闻，也绝不因点踩屏蔽整个来源。
+    """
+    data = request.get_json(silent=True) or {}
+    action = (data.get("action") or "").strip().lower()
+    if action not in db.VOTE_VALUES:
+        return jsonify({"ok": False, "error": "action 必须是 up / down / none",
+                        "allowed": db.VOTE_VALUES}), 400
+    if not db.get_news(news_id):
+        return jsonify({"ok": False, "error": "新闻不存在"}), 404
+    updated = db.update_vote(news_id, action)
+    if not updated:
+        return jsonify({"ok": False, "error": "投票失败，请稍后重试"}), 400
+    delta = updated["weight_delta"]
+    if action == "down":
+        message = f"已隐藏，可在历史页查看（来源权重 {delta:+d}）"
+    elif action == "up":
+        message = f"已点赞（来源权重 {delta:+d}）"
+    else:
+        message = "已撤销投票"
+    if action == "up" and updated["previous_vote"] == "up":
+        message = "已经点过赞了，权重不变"
+    return jsonify({
+        "ok": True,
+        "id": news_id,
+        "action": action,
+        "user_vote": updated["user_vote"],
+        "hidden": bool(updated["hidden"]),
+        "hidden_at": updated["hidden_at"] or "",
+        "weights": updated["weights"],
+        "weight_delta": delta,
+        "weight_range": {"min": db.WEIGHT_MIN, "max": db.WEIGHT_MAX},
+        "message": message,
+    })
+
+
+@app.post("/api/news/<int:news_id>/unhide")
+def api_unhide(news_id: int):
+    """取消隐藏：恢复展示，并回退那次点踩的权重（spec v2.3 第 2、5 节）。"""
+    if not db.get_news(news_id):
+        return jsonify({"ok": False, "error": "新闻不存在"}), 404
+    updated = db.unhide_news(news_id)
+    if not updated:
+        return jsonify({"ok": False, "error": "取消隐藏失败，请稍后重试"}), 400
+    return jsonify({
+        "ok": True,
+        "id": news_id,
+        "user_vote": updated["user_vote"],
+        "hidden": bool(updated["hidden"]),
+        "hidden_at": "",
+        "weights": updated["weights"],
+        "restored_ids": updated.get("restored_ids") or [],
+        "message": "已取消隐藏，该新闻恢复展示",
+    })
+
+
+@app.get("/api/source-weights")
+def api_source_weights():
+    """查看所有来源权重（spec v2.3 第 4 节）：sources.json 里的源默认 0，点过 👍/👎 的带真实值。"""
+    sources, _settings = load_config()
+    stored = {r["source_name"]: r for r in db.source_weight_rows()}
+    tiers = source_tier_map()
+    items = []
+    seen = set()
+    for s in sources:
+        name = s.get("name", "")
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        row = stored.get(name) or {}
+        items.append({
+            "source_name": name,
+            "weight": int(row.get("weight", 0) or 0),
+            "updated_at": row.get("updated_at", ""),
+            "tier": (tiers.get(name) or {}).get("tier", fetcher.source_tier(s)),
+            "type": s.get("type", "other"),
+            "domain": s.get("domain", ""),
+            "voted": name in stored,
+        })
+    # 已经不在 sources.json 里、但历史上被投过票的来源也一并列出
+    for name, row in stored.items():
+        if name in seen:
+            continue
+        items.append({"source_name": name, "weight": int(row["weight"] or 0),
+                      "updated_at": row["updated_at"], "tier": 4, "type": "other",
+                      "domain": "", "voted": True})
+    items.sort(key=lambda r: (-r["weight"], r["source_name"]))
+    return jsonify({
+        "ok": True,
+        "count": len(items),
+        "items": items,
+        "weight_range": {"min": db.WEIGHT_MIN, "max": db.WEIGHT_MAX},
+        "rules": {
+            "tier2_upgrade": WEIGHT_UPGRADE,
+            "tier2_upgraded_to": TIER_UPGRADED,
+            "tier2_downgrade": WEIGHT_DOWNGRADE,
+            "decay_monthly": db.WEIGHT_DECAY_RATIO,
+        },
+        "decay": db.decay_state(),
+        "readonly": True,
+    })
 
 
 @app.post("/api/news/<int:news_id>/user-score")
@@ -688,6 +841,13 @@ def api_set_evaluation(news_id: int):
                     "highlight": updated["highlight"], "hotspot_status": updated["hotspot_status"]})
 
 
+def startup() -> dict:
+    """建库/迁移 + 补 url_key + 清重复 + 每月一次的来源权重衰减（spec v2.3 第 2 节）。"""
+    report = db.init_db()
+    report["weight_decay"] = db.decay_source_weights()
+    return report
+
+
 if __name__ == "__main__":
-    db.init_db()
+    startup()
     app.run(host="127.0.0.1", port=5000, debug=False, threaded=True)

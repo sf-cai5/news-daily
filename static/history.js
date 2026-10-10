@@ -14,7 +14,7 @@
   var pending = null;       // 同一时刻只发一个请求
 
   // 只有「模块」这一个维度：综合 / AI / 民生 / 社会国内 / 社会国外
-  var flt = { date: '', module: '', cred: '', minScore: '', q: '', page: 1 };
+  var flt = { date: '', module: '', cred: '', minScore: '', q: '', hidden: '', page: 1 };
 
   function domainLabel(key) {
     var map = (meta && meta.module_labels) || null;
@@ -25,6 +25,12 @@
   function tierOf(name) {
     var map = (meta && meta.source_tiers) || {};
     return (map[name] && map[name].tier) || 4;
+  }
+
+  /* 来源当前权重：默认不显示，hover 才看到（spec v2.3 第 5 节） */
+  function weightOf(item, name) {
+    var map = (item && item.source_weights) || (meta && meta.source_weights) || {};
+    return Number(map[name] || 0);
   }
 
   function basisOf(item) {
@@ -65,6 +71,15 @@
     }
     var dateEl = el('h-date');
     if (dateEl && !dateEl.value && flt.date) { dateEl.value = flt.date; }
+    // spec v2.3：已隐藏筛选（全部 / 只看已隐藏 / 隐藏的不看）
+    var hiddenSel = el('h-hidden');
+    if (hiddenSel) {
+      hiddenSel.innerHTML = [['', t().allHidden], ['only', t().onlyHidden], ['visible', t().hideHidden]]
+        .map(function (row) {
+          return '<option value="' + row[0] + '"' + (flt.hidden === row[0] ? ' selected' : '') + '>' +
+            esc(row[1]) + '</option>';
+        }).join('');
+    }
   }
 
   /* ---------------- 卡片（只读版，与今日视图的卡片分开维护） ---------------- */
@@ -86,7 +101,10 @@
       (list.length > 1 ? '（' + esc(t().sourceCount(list.length)) + '）' : '')) + '</summary><ul>' +
       list.map(function (s) {
         var tier = tierOf(s);
-        return '<li><span class="tag t' + tier + '">T' + tier + '</span> ' + esc(s) + '</li>';
+        var weight = weightOf(item, s);
+        return '<li class="srow" title="' + esc(t().weight + ' ' + (weight > 0 ? '+' + weight : String(weight))) +
+          '"><span class="tag t' + tier + '">T' + tier + '</span> ' + esc(s) +
+          '<span class="wtag">' + esc(weight > 0 ? '+' + weight : String(weight)) + '</span></li>';
       }).join('') + '</ul></details>';
   }
 
@@ -98,11 +116,16 @@
       ? '<span class="tag ' + (item.hotspot_score >= 3 ? 'hot' : 'muted') + '">' + esc(t().hotspot + ' ' + item.hotspot_score + '/5') + '</span>'
       : '<span class="tag hot-none">' + esc(t().unscored) + '</span>';
     var moduleTag = '<span class="tag muted">' + esc((domainLabel(item.module).zh) || item.module) + '</span>';
+    // spec v2.3：被点踩隐藏的新闻在历史页照样查得到，并显示「已隐藏」标记
+    var hiddenTag = item.hidden
+      ? '<span class="tag hidden-tag" title="' + esc(item.hidden_basis || t().voteDownHint) + '">' +
+        esc(t().hiddenTag) + '</span>'
+      : '';
     var basis = basisOf(item);
     return '' +
-      '<article class="card" data-id="' + item.id + '">' +
+      '<article class="card' + (item.hidden ? ' is-hidden' : '') + '" data-id="' + item.id + '">' +
         '<div class="card-top">' +
-          moduleTag +
+          moduleTag + hiddenTag +
           '<span class="tag domain">' + A.bi(dom.zh, dom.en) + '</span>' +
           '<span class="cred cred-' + esc(cred) + '">' + esc(cred) + '</span>' + manual +
           hotspot + '<span class="tag muted">' + esc(t().readonly) + '</span>' +
@@ -123,6 +146,9 @@
           starsHtml(item) +
           '<div class="card-actions">' +
             '<button class="btn tiny" type="button" data-role="copy-oral">' + esc(t().copyOral) + '</button>' +
+            (item.hidden
+              ? '<button class="btn tiny" type="button" data-role="unhide">' + esc(t().unhide) + '</button>'
+              : '') +
             '<button class="btn tiny" type="button" data-role="detail">' + esc(t().detail) + '</button>' +
             '<a class="link" href="' + esc(item.url) + '" target="_blank" rel="noopener">' + esc(t().link) + '</a>' +
           '</div>' +
@@ -157,6 +183,7 @@
     if (flt.cred) { params.push('credibility=' + encodeURIComponent(flt.cred)); }
     if (flt.minScore) { params.push('min_user_score=' + encodeURIComponent(flt.minScore)); }
     if (flt.q) { params.push('q=' + encodeURIComponent(flt.q)); }
+    if (flt.hidden) { params.push('hidden=' + encodeURIComponent(flt.hidden)); }
     return '/api/history?' + params.join('&');
   }
 
@@ -178,9 +205,11 @@
     flt.date = dateEl ? dateEl.value : flt.date;
     flt.q = qEl ? qEl.value.trim() : flt.q;
     var moduleSel = el('h-module'), credSel = el('h-cred'), scoreSel = el('h-score');
+    var hiddenSel = el('h-hidden');
     if (moduleSel) { flt.module = moduleSel.value; }
     if (credSel) { flt.cred = credSel.value; }
     if (scoreSel) { flt.minScore = scoreSel.value; }
+    if (hiddenSel) { flt.hidden = hiddenSel.value; }
   }
 
   /* ---------------- 详情弹层 ---------------- */
@@ -255,10 +284,12 @@
     var clearBtn = el('h-clear');
     if (clearBtn) {
       clearBtn.addEventListener('click', function () {
-        flt = { date: '', module: '', cred: '', minScore: '', q: '', page: 1 };
+        flt = { date: '', module: '', cred: '', minScore: '', q: '', hidden: '', page: 1 };
         var dateEl = el('h-date'), qEl = el('h-q');
         if (dateEl) { dateEl.value = ''; }
         if (qEl) { qEl.value = ''; }
+        var hiddenSel = el('h-hidden');
+        if (hiddenSel) { hiddenSel.value = ''; }
         renderFilters();
         load();
       });
@@ -278,7 +309,7 @@
     }
 
     [['h-date', 'date'], ['h-module', 'module'],
-     ['h-cred', 'cred'], ['h-score', 'minScore']].forEach(function (pair) {
+     ['h-cred', 'cred'], ['h-score', 'minScore'], ['h-hidden', 'hidden']].forEach(function (pair) {
       var node = el(pair[0]);
       if (!node) { return; }
       node.addEventListener('change', function () {
@@ -317,9 +348,21 @@
         var roleEl = target.closest('[data-role]');
         var role = roleEl ? roleEl.getAttribute('data-role') : '';
         if (role === 'copy-oral') { A.copyText(item.oral_prompt || ''); }
+        else if (role === 'unhide') { unhide(item); }
         else if (role === 'detail') { detailModal(item); }
       });
     }
+  }
+
+  /* spec v2.3：取消隐藏（恢复展示，同时回退那次点踩的权重） */
+  function unhide(item) {
+    return A.post('/api/news/' + item.id + '/unhide', {}).then(function (res) {
+      if (!res || !res.ok) { A.toast((res && res.error) || t().failed); return; }
+      item.hidden = false;
+      item.user_vote = res.user_vote || 'none';
+      A.toast(res.message || t().unhiddenToast);
+      load();
+    }).catch(function () { A.toast(t().failed); });
   }
 
   /* ---------------- 对外 ---------------- */

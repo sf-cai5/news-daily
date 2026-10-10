@@ -98,17 +98,22 @@ def seed_api_db(name="api.db"):
     for title, url, domain, hours, cred, score, lang in data:
         db.insert_news(row(title, url, domain, hours, cred, score, lang),
                        domain, ts)
-    db.insert_news(row("跨模块样本", "https://both.example.com/a", "ai", 2, "单一来源", None),
-                   "comprehensive", ts)
+    # 同一条新闻同时进综合与领域模块（url + module 联合唯一），历史页默认按 url_key 去重
+    cross = row("跨模块样本", "https://both.example.com/a", "ai", 2, "单一来源", None)
+    db.insert_news(cross, "ai", ts)
+    db.insert_news(dict(cross), "comprehensive", ts)
 
 
 @contextmanager
 def fake_fetch(items, config=None):
-    """把网络抓取替换成固定数据，退出时还原（包括 load_config）。"""
+    """把网络抓取替换成固定数据，退出时还原（包括 load_config）。
+
+    真实 fetch_all 现在多一个 weights 参数（spec v2.3），桩函数必须一起接受。
+    """
     origin_fetch, origin_enrich, origin_config = (app.fetcher.fetch_all,
                                                   app.fetcher.enrich_summaries,
                                                   ORIGIN_LOAD_CONFIG)
-    app.fetcher.fetch_all = lambda sources, settings=None: (list(items), [])
+    app.fetcher.fetch_all = lambda sources, settings=None, weights=None, **kw: (list(items), [])
     app.fetcher.enrich_summaries = lambda items_, settings=None, workers=4: 0
     if config is not None:
         app.load_config = config
@@ -136,7 +141,8 @@ def test_schema():
                for r in conn.execute("PRAGMA index_list(news)").fetchall()}
     need = {"module", "title_zh", "title_en", "summary_zh", "summary_en", "source_lang",
             "translation_status", "oral_prompt", "hotspot_score", "highlight", "hotspot_status",
-            "published_at", "published_at_source", "module_shown_at", "shown_at", "created_at"}
+            "published_at", "published_at_source", "module_shown_at", "shown_at", "created_at",
+            "user_score", "user_note", "user_vote", "hidden", "hidden_at"}
     check("新增字段齐全", need <= cols, ("缺 " + str(sorted(need - cols))) if need - cols else "")
     check("url + module 联合唯一索引存在",
           any(sorted(c) == ["module", "url"] for c in idx.values()))
@@ -147,6 +153,10 @@ def test_schema():
           db.MODULES == ["comprehensive", "ai", "livelihood", "society_cn", "society_intl"])
     check("库里不存新闻全文（只存必要字段）",
           not ({"content", "body", "fulltext"} & cols))
+    with db.connect() as conn:
+        weight_cols = {r["name"] for r in conn.execute("PRAGMA table_info(source_weights)").fetchall()}
+    check("v2.3 新增 source_weights 表（source_name / weight / updated_at）",
+          {"source_name", "weight", "updated_at"} <= weight_cols, str(sorted(weight_cols)))
 
 
 def test_legacy_migration():
@@ -793,11 +803,13 @@ def test_history_dedup():
 
 
 def test_frontend_static():
-    print("\n== 19) 前端静态检查（无“领域”下拉 / 只发一次请求 / 渲染前清空）==")
+    print("\n== 19) 前端静态检查（无“领域”下拉 / 只发一次请求 / 渲染前清空 / 👍👎）==")
     base = os.path.dirname(os.path.abspath(__file__))
     html = open(os.path.join(base, "templates", "index.html"), encoding="utf-8").read()
     today_js = open(os.path.join(base, "static", "today.js"), encoding="utf-8").read()
     history_js = open(os.path.join(base, "static", "history.js"), encoding="utf-8").read()
+    app_js = open(os.path.join(base, "static", "app.js"), encoding="utf-8").read()
+    css = open(os.path.join(base, "static", "style.css"), encoding="utf-8").read()
 
     check("页面里已无“领域”下拉", "h-domain" not in html and "领域" not in html)
     check("history.js 里已无领域筛选", "h-domain" not in history_js and "flt.domain" not in history_js)
@@ -813,28 +825,21 @@ def test_frontend_static():
     check("每个模块标签带自己的刷新按钮", "data-refresh-module" in today_js)
     check("日期控件在 HTML 里且绑定正确",
           'id="h-date"' in html and "el('h-date')" in history_js)
-
-
-def main() -> None:
-    test_schema()
-    test_legacy_migration()
-    test_dedup()
-    test_windows_and_hotspot()
-    test_module_refresh()
-    test_comprehensive()
-    test_published_at()
-    test_translation_and_eval()
-    test_hotspot_filter()
-    test_history()
-    test_api()
-    test_fetcher_helpers()
-    test_keyword_gate()
-    test_tier_credibility()
-    test_credibility_auto_and_override()
-    test_user_score()
-    test_url_scheme_and_purge()
-    test_history_dedup()
-    test_frontend_static()
+    # spec v2.3 前端：👍/👎、隐藏、取消隐藏、已隐藏筛选、权重 hover
+    check("今日卡片带 👍/👎 按钮",
+          'data-role="vote-up"' in today_js and 'data-role="vote-down"' in today_js)
+    check("点踩后卡片从今日页移除",
+          "parentNode.removeChild" in today_js and "vote-down" in today_js)
+    check("今日页再兜一道 hidden 过滤",
+          "filter(function (i) { return !i.hidden; })" in today_js)
+    check("历史页有已隐藏标记与取消隐藏入口",
+          "hidden-tag" in history_js and 'data-role="unhide"' in history_js)
+    check("历史页已隐藏筛选绑定 h-hidden",
+          'id="h-hidden"' in html and "el('h-hidden')" in history_js)
+    check("来源权重默认不显示、hover 才可见（CSS）",
+          ".srow .wtag" in css and ".srow:hover .wtag" in css)
+    check("i18n 补齐投票/隐藏文案",
+          all(k in app_js for k in ("voteUp", "voteDown", "hiddenTag", "unhide", "onlyHidden")))
 
 
 def test_user_score():
@@ -872,6 +877,302 @@ def test_user_score():
     check("今日列表也支持评分筛选", today["total"] >= 1)
     check("卡片下发 user_note", any(i["user_note"] == "适合做视频" for i in
                                     client.get("/api/history?min_user_score=4").get_json()["items"]))
+
+
+# ---------------------------------------------------------------- 20 投票（spec v2.3）
+
+def test_vote():
+    print("\n== 20) 👍/👎 投票、隐藏与取消隐藏（spec v2.3 第 1、2、4 节）==")
+    seed_api_db("vote.db")
+    client = app.app.test_client()
+    rows, _total = db.today_items("ai", page=1, page_size=10)
+    target = rows[0]
+    source = target["sources"][0]
+
+    check("来源权重初始为 0", db.get_source_weight(source) == 0, str(db.get_source_weight(source)))
+    check("投票前 user_vote=none 且未隐藏",
+          (target["user_vote"] or "none") == "none" and not target["hidden"])
+
+    res = client.post(f"/api/news/{target['id']}/vote", json={"action": "up"})
+    body = res.get_json()
+    check("点赞返回 200", res.status_code == 200 and body["ok"], str(body.get("error")))
+    check("点赞后来源权重 +1", db.get_source_weight(source) == 1, str(db.get_source_weight(source)))
+    saved = db.get_news(target["id"])
+    check("点赞后 user_vote=up、仍正常展示",
+          saved["user_vote"] == "up" and not saved["hidden"], f"{saved['user_vote']}/{saved['hidden']}")
+    check("点赞消息说明权重变化", "+1" in body["message"], body["message"])
+
+    again = client.post(f"/api/news/{target['id']}/vote", json={"action": "up"}).get_json()
+    check("重复点赞不重复加权重（幂等）",
+          db.get_source_weight(source) == 1 and again["weight_delta"] == 0)
+
+    down = client.post(f"/api/news/{target['id']}/vote", json={"action": "down"}).get_json()
+    check("从赞转踩：把那次 +1 也撤掉（权重 -2 → -1）",
+          db.get_source_weight(source) == -1 and down["weight_delta"] == -2,
+          f"{db.get_source_weight(source)}/{down['weight_delta']}")
+    saved = db.get_news(target["id"])
+    check("点踩后 hidden=1、user_vote=down、记 hidden_at",
+          saved["hidden"] == 1 and saved["user_vote"] == "down" and bool(saved["hidden_at"]),
+          f"hidden={saved['hidden']} at={saved['hidden_at']}")
+    check("点踩消息提示去历史页看", "历史" in down["message"], down["message"])
+
+    titles = [i["title"] for i in db.today_items("ai", page=1, page_size=10)[0]]
+    check("点踩后该新闻从今日页消失", target["title"] not in titles, str(titles[:3]))
+    api_today = client.get("/api/news?module=ai").get_json()
+    check("今日页接口也不再下发它",
+          all(i["id"] != target["id"] for i in api_today["items"]))
+    check("新闻没有被删除（库里还在）", db.get_news(target["id"]) is not None)
+
+    hist = client.get("/api/history?page_size=100").get_json()
+    found = [i for i in hist["items"] if i["id"] == target["id"]]
+    check("历史页仍能查到被隐藏的新闻", bool(found))
+    check("历史页下发 hidden 标记", bool(found) and found[0]["hidden"] is True)
+    only = client.get("/api/history?hidden=only&page_size=100").get_json()
+    check("历史页可「只看已隐藏」",
+          only["total"] >= 1 and all(i["hidden"] for i in only["items"]), f"total={only['total']}")
+    visible = client.get("/api/history?hidden=visible&page_size=100").get_json()
+    check("历史页可「隐藏的不看」",
+          all(not i["hidden"] for i in visible["items"]) and visible["hidden"] == "visible")
+
+    un = client.post(f"/api/news/{target['id']}/unhide", json={}).get_json()
+    check("取消隐藏返回 200", un["ok"] and un["hidden"] is False, str(un))
+    check("取消隐藏撤销那次点踩（权重回到 0）", db.get_source_weight(source) == 0,
+          str(db.get_source_weight(source)))
+    check("取消隐藏后 hidden_at 清空", not db.get_news(target["id"])["hidden_at"])
+    check("取消隐藏后重新出现在今日页",
+          target["title"] in [i["title"] for i in db.today_items("ai", page=1, page_size=10)[0]])
+
+    fresh = client.post(f"/api/news/{target['id']}/vote", json={"action": "down"}).get_json()
+    check("从没态度直接点踩：来源权重 -1（spec 验收项）",
+          db.get_source_weight(source) == -1 and fresh["weight_delta"] == -1,
+          f"{db.get_source_weight(source)}/{fresh['weight_delta']}")
+    check("再次点踩后重新隐藏", db.get_news(target["id"])["hidden"] == 1)
+    check("取消隐藏接口可再次恢复",
+          client.post(f"/api/news/{target['id']}/unhide", json={}).get_json()["hidden"] is False)
+
+    check("非法 action 被拒 400",
+          client.post(f"/api/news/{target['id']}/vote", json={"action": "meh"}).status_code == 400)
+    check("缺少 action 被拒 400",
+          client.post(f"/api/news/{target['id']}/vote", json={}).status_code == 400)
+    check("投票：不存在的 id 返回 404",
+          client.post("/api/news/999999/vote", json={"action": "up"}).status_code == 404)
+    check("取消隐藏：不存在的 id 返回 404",
+          client.post("/api/news/999999/unhide", json={}).status_code == 404)
+
+    # 隐藏按 url_key 生效：同一条新闻的多个模块行一起从今日页消失
+    use_db("vote_cross.db")
+    ts = db.now_iso()
+    cross = row("跨模块投票样本", "https://vc.example.com/a", "ai", hours_ago=1, source="跨模块源")
+    check("同一 url 可入库两个模块",
+          db.insert_news(cross, "ai", ts) and db.insert_news(dict(cross), "comprehensive", ts))
+    ai_row = db.today_items("ai", page=1, page_size=10)[0][0]
+    client.post(f"/api/news/{ai_row['id']}/vote", json={"action": "down"})
+    check("点踩后 AI 模块今日页不再有它", not db.today_items("ai", page=1, page_size=10)[0])
+    check("综合模块的同一条也一起消失",
+          not db.today_items("comprehensive", page=1, page_size=10)[0])
+    check("两者都只是 hidden，没有被删除",
+          db.get_news(ai_row["id"]) is not None and db.stats()["total"] == 2)
+
+
+# ---------------------------------------------------------------- 21 权重边界与衰减
+
+def test_weight_bounds_and_decay():
+    print("\n== 21) 权重范围 -10~+10 与每月衰减 10%（spec v2.3 第 2 节）==")
+    use_db("weight.db")
+    client = app.app.test_client()
+    ts = db.now_iso()
+    for i in range(16):
+        db.insert_news(row(f"同源条目{i}", f"https://wd{i}.example.com/a", "ai", hours_ago=1,
+                           source="重踩源"), "ai", ts)
+        db.insert_news(row(f"同源条目{i}b", f"https://wu{i}.example.com/a", "ai", hours_ago=1,
+                           source="重赞源"), "ai", ts)
+
+    rows, _ = db.today_items("ai", page=1, page_size=40)
+    for r in rows:
+        action = "down" if r["sources"] == ["重踩源"] else "up"
+        client.post(f"/api/news/{r['id']}/vote", json={"action": action})
+    check("反复点踩不会无限下降（下限 -10）", db.get_source_weight("重踩源") == -10,
+          str(db.get_source_weight("重踩源")))
+    check("反复点赞不会无限增长（上限 +10）", db.get_source_weight("重赞源") == 10,
+          str(db.get_source_weight("重赞源")))
+    check("clamp_weight 夹住越界值",
+          db.clamp_weight(999) == 10 and db.clamp_weight(-999) == -10)
+
+    db.set_source_weight("衰减源", 8)
+    db.set_source_weight("负衰减源", -8)
+    first = db.decay_source_weights()
+    check("首次衰减执行并记录月份",
+          first["decayed"] is True and first["month"] == db.current_month(), str(first))
+    check("衰减 10%（8→7、-8→-7）",
+          db.get_source_weight("衰减源") == 7 and db.get_source_weight("负衰减源") == -7,
+          f"{db.get_source_weight('衰减源')}/{db.get_source_weight('负衰减源')}")
+    same = db.decay_source_weights()
+    check("同一个月只衰减一次", same["decayed"] is False and db.get_source_weight("衰减源") == 7)
+    later = db.decay_source_weights(now=datetime.now() + timedelta(days=31))
+    check("跨月会再次衰减", later["decayed"] is True and db.get_source_weight("衰减源") == 6,
+          str(db.get_source_weight("衰减源")))
+    check("decay_weight 向 0 靠拢且不变号",
+          db.decay_weight(1) == 0 and db.decay_weight(-1) == 0 and
+          db.decay_weight(10) == 9 and db.decay_weight(-10) == -9)
+    check("衰减状态可查（给前端/接口用）",
+          db.decay_state()["ratio"] == 0.9 and db.decay_state()["month"] == db.current_month())
+
+    # 已停更/未知来源也会被衰减，只是没有记录而已
+    check("未记录过的来源权重视为 0", db.get_source_weight("从没出现过的源") == 0)
+    check("source_weights_map 可整体取出", isinstance(db.source_weights_map(), dict))
+
+
+# ---------------------------------------------------------------- 22 权重影响排序/可信度/抓取
+
+def test_weight_effects():
+    print("\n== 22) 权重影响排序 / 可信度 / 抓取（spec v2.3 第 3 节）==")
+    use_db("weight_order.db")
+    ts = db.now_iso()
+    db.set_source_weight("加权源", 6)
+    db.set_source_weight("踩过的源", -6)
+    db.insert_news(row("加权来源的旧新闻", "https://wa.example.com/a", "ai", hours_ago=10,
+                       source="加权源"), "ai", ts)
+    db.insert_news(row("普通来源的新新闻", "https://wb.example.com/a", "ai", hours_ago=1,
+                       source="普通源"), "ai", ts)
+    db.insert_news(row("踩过来源的最新新闻", "https://wc.example.com/a", "ai", hours_ago=0.5,
+                       source="踩过的源"), "ai", ts)
+    items, _t = db.today_items("ai", page=1, page_size=10)
+    order = [i["sources"][0] for i in items]
+    check("权重高的来源排在前面", order[0] == "加权源", str(order))
+    check("权重低的来源排在后面", order[-1] == "踩过的源", str(order))
+    check("权重为 0 的来源排在中间", order[1] == "普通源", str(order))
+    check("权重不影响条数（三条都在）", len(items) == 3)
+    check("接口下发该条来源的当前权重", client_weights_of("普通源") == 0)
+
+    # 排序仍以权重为唯一新增维度：全都 0 时就是原来的发布时间倒序
+    use_db("weight_order2.db")
+    ts = db.now_iso()
+    for i, hours in enumerate([9, 1, 5]):
+        db.insert_news(row(f"同权重{i}", f"https://wo{i}.example.com/a", "ai", hours_ago=hours),
+                       "ai", ts)
+    plain, _t = db.today_items("ai", page=1, page_size=10)
+    check("权重全为 0 时仍是发布时间倒序",
+          [i["title"] for i in plain] == ["同权重1", "同权重2", "同权重0"],
+          str([i["title"] for i in plain]))
+
+    from verifier import credibility_basis, effective_tier, judge_credibility
+
+    def group(cands):
+        groups = merge_events(cands)
+        for g in groups:
+            g["conflict_points"] = conflict_points(g)
+        return groups[0]
+
+    g = group([item("某地新规落地", "https://x1.example.com/a", "livelihood", "量子位", 2, hours_ago=1),
+               item("某地新规落地细则公布", "https://x2.example.com/a", "livelihood", "澎湃新闻", 2,
+                    hours_ago=2)])
+    check("两个 Tier 2、无权重 → 较可信", judge_credibility(g) == "较可信", judge_credibility(g))
+    check("权重 +5 的 Tier 2 视为 Tier 1.5",
+          effective_tier("量子位", 2, {"量子位": 5}) == 1.5 and
+          effective_tier("量子位", 2, {"量子位": 4}) == 2.0)
+    check("Tier 1.5 参与「已证实」判定", judge_credibility(g, {"量子位": 5}) == "已证实")
+    check("判定依据写出权重微调",
+          "量子位 / Tier 2（权重 +5 → Tier 1.5）" in credibility_basis(g, {"量子位": 5}),
+          credibility_basis(g, {"量子位": 5}))
+    check("权重 -5 的 Tier 2 降为 Tier 3",
+          effective_tier("量子位", 2, {"量子位": -5}) == 3.0)
+    check("被降级的来源把事件拉到「存疑」", judge_credibility(g, {"量子位": -5}) == "存疑")
+    check("判定依据写出降级原因",
+          "权重 -5 → Tier 3" in credibility_basis(g, {"量子位": -5}))
+    check("权重微调不覆盖原 Tier 规则（不传 weights 与 v2.2 一致）",
+          judge_credibility(g) == "较可信" and credibility_basis(g) == "量子位 / Tier 2，澎湃新闻 / Tier 2")
+    check("非 Tier 2 的来源不受权重影响",
+          effective_tier("新华网", 1, {"新华网": 9}) == 1.0 and
+          effective_tier("IT之家", 3, {"IT之家": -9}) == 3.0)
+
+    # 抓取：加权多抓、降权少抓，但都不屏蔽
+    max_per = app.fetcher.max_per_source_for
+    check("降权源少抓条数（12 → 6）", max_per("低权重源", 12, {"低权重源": -6}) == 6)
+    check("降权源仍至少抓 3 条（不屏蔽）",
+          max_per("低权重源", 4, {"低权重源": -9}) >= app.fetcher.WEIGHT_FLOOR_ITEMS)
+    check("加权源优先抓、条数上调（12 → 18）", max_per("高权重源", 12, {"高权重源": 6}) == 18)
+    check("无权重时抓取条数不变", max_per("普通源", 12, {}) == 12)
+
+    recorded, order_seen = {}, []
+    origin_source = app.fetcher.fetch_source
+
+    def fake_source(source, session, settings):
+        recorded[source["name"]] = settings["max_per_source"]
+        order_seen.append(source["name"])
+        return [{"source": source["name"], "title": source["name"], "url": f"https://{source['name']}.invalid/a",
+                 "summary": "", "domain": "ai", "tier": 3, "published_at": None}], None
+
+    app.fetcher.fetch_source = fake_source
+    try:
+        items, _errors = app.fetcher.fetch_all(
+            [{"name": "低权重源"}, {"name": "高权重源"}, {"name": "普通源"}],
+            {"max_per_source": 12, "workers": 2},
+            weights={"低权重源": -6, "高权重源": 6},
+        )
+    finally:
+        app.fetcher.fetch_source = origin_source
+    check("抓取时按权重调条数",
+          recorded.get("低权重源") == 6 and recorded.get("高权重源") == 18
+          and recorded.get("普通源") == 12, str(recorded))
+    check("加权来源先被调度", order_seen and order_seen[0] == "高权重源", str(order_seen))
+    check("加权来源的条目排在候选池前面",
+          items and items[0]["source"] == "高权重源", str([i["source"] for i in items]))
+
+
+def client_weights_of(name):
+    """该来源在 /api/news 下发数据里的权重（前端 hover 显示用）。"""
+    data = app.app.test_client().get("/api/news?module=ai").get_json()
+    for i in data["items"]:
+        if name in (i.get("source_weights") or {}):
+            return i["source_weights"][name]
+    return None
+
+
+# ---------------------------------------------------------------- 23 权重接口
+
+def test_source_weights_api():
+    print("\n== 23) /api/source-weights 与 /api/meta 下发（spec v2.3 第 4、5 节）==")
+    seed_api_db("weights_api.db")
+    client = app.app.test_client()
+    data = client.get("/api/source-weights").get_json()
+    check("来源权重接口可用", data["ok"] is True and data["count"] >= 20, f"count={data.get('count')}")
+    check("接口带权重范围 -10~+10", data["weight_range"] == {"min": -10, "max": 10})
+    check("接口带权重规则（Tier 2 ±5 微调）",
+          data["rules"]["tier2_upgrade"] == 5 and data["rules"]["tier2_downgrade"] == -5
+          and data["rules"]["tier2_upgraded_to"] == 1.5)
+    check("接口带每月衰减比例", data["decay"]["ratio"] == 0.9 and "month" in data["decay"])
+    check("所有下发权重都在 -10~+10",
+          all(-10 <= i["weight"] <= 10 for i in data["items"]))
+    check("sources.json 里的源默认权重 0 且 voted=false",
+          all(i["weight"] == 0 and i["voted"] is False for i in data["items"] if not i["voted"]))
+    check("条目带 tier / type / domain",
+          all({"tier", "type", "domain"} <= set(i) for i in data["items"]))
+
+    rows, _t = db.today_items("ai", page=1, page_size=10)
+    client.post(f"/api/news/{rows[0]['id']}/vote", json={"action": "up"})
+    after = client.get("/api/source-weights").get_json()
+    voted = [i for i in after["items"] if i["voted"]]
+    check("点过赞的来源出现在列表里且带 updated_at",
+          voted and voted[0]["weight"] == 1 and bool(voted[0]["updated_at"]), str(voted[:1]))
+    check("权重高的排在列表前面", after["items"][0]["weight"] == 1)
+
+    meta = client.get("/api/meta").get_json()
+    check("meta 下发投票取值与权重范围",
+          meta["vote_values"] == ["up", "down", "none"] and meta["weight_range"]["min"] == -10)
+    check("meta 下发权重规则供前端解释",
+          meta["weight_rules"]["tier2_upgrade"] == 5
+          and meta["weight_rules"]["fetch_depriority"] == -5)
+    check("meta 下发当前来源权重表", isinstance(meta["source_weights"], dict) and meta["source_weights"])
+
+    today = client.get("/api/news?module=ai").get_json()
+    check("今日页每条下发 user_vote / hidden / source_weights",
+          all({"user_vote", "hidden", "source_weights"} <= set(i) for i in today["items"]))
+    ups = [i for i in today["items"] if i["user_vote"] == "up"]
+    check("点赞状态随接口下发（前端可高亮）", bool(ups))
+    history = client.get("/api/history").get_json()
+    check("历史页也下发 hidden 标记与权重",
+          all({"hidden", "source_weights"} <= set(i) for i in history["items"]))
+    check("历史页回显 hidden 筛选参数", history["hidden"] == "")
 
 
 def test_url_scheme_and_purge():
@@ -938,6 +1239,13 @@ def main() -> None:
     test_credibility_auto_and_override()
     test_user_score()
     test_url_scheme_and_purge()
+    test_history_dedup()
+    test_frontend_static()
+    # spec v2.3：👍/👎 投票 + 来源权重
+    test_vote()
+    test_weight_bounds_and_decay()
+    test_weight_effects()
+    test_source_weights_api()
 
     print("\n" + "=" * 58)
     print(f"通过 {len(PASS)} 项，失败 {len(FAIL)} 项")

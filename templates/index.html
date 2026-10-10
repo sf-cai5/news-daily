@@ -69,6 +69,7 @@
       <select id="h-module" title="模块 / Module"></select>
       <select id="h-cred" title="可信度 / Credibility"></select>
       <select id="h-score" title="我的评分 / My rating"></select>
+      <select id="h-hidden" title="已隐藏 / Hidden"></select>
       <input type="search" id="h-q" placeholder="关键词搜索标题与摘要 / keyword in title &amp; summary">
       <span class="grow"></span>
       <span id="h-pageinfo" class="pageinfo">1 / 1</span>
@@ -82,8 +83,8 @@
 
   <footer class="footer">
     <span>
-      本地运行 · SQLite · 模块内独立去重 · 可信度按来源 Tier 自动判定，可人工覆盖<br>
-      <span class="bi">Local only · SQLite · per-module dedup · credibility is tier-based and human-overridable</span>
+      本地运行 · SQLite · 模块内独立去重 · 可信度按来源 Tier 自动判定，可人工覆盖 · 👍/👎 累积来源权重（-10 ~ +10，每月衰减 10%）<br>
+      <span class="bi">Local only · SQLite · per-module dedup · tier-based credibility · 👍/👎 adjust source weights (-10 to +10, 10% monthly decay)</span>
     </span>
     <span id="errs" class="errs"></span>
   </footer>
